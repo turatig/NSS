@@ -45,6 +45,9 @@ uint8_t amg8833IsReady(AMG8833 *inst);
 /*
  * Read 128 bytes from register T01L to T64H.
  */
+HAL_StatusTypeDef amg8833Reset(AMG8833 *inst);
 HAL_StatusTypeDef amg8833ReadPoll(AMG8833 *inst, uint8_t *data);
+/* Read one frame in DMA mode*/
+HAL_StatusTypeDef amg8833ReadDMA(AMG8833 *inst,uint8_t *data);
 
 #endif /* INC_AMG8833_H_ */

@@ -20,9 +20,22 @@ uint8_t amg8833IsReady(AMG8833 *inst){
 	return (uint8_t)(status==HAL_OK);
 }
 
+uint8_t amg8833IsDMAEnabled(AMG8833 *inst){
+	return (uint8_t)(inst->hi2c->hdmarx!=NULL);
+}
+
 HAL_StatusTypeDef amg8833ReadPoll(AMG8833 *inst,uint8_t *data){
 	HAL_StatusTypeDef status;
 	status=HAL_I2C_Mem_Read(inst->hi2c,(uint16_t)inst->adri2c,AMG8833_T01L,
 			1,data,128,HAL_MAX_DELAY);
+	return status;
+}
+
+HAL_StatusTypeDef amg8833ReadDMA(AMG8833 *inst,uint8_t *data){
+	HAL_StatusTypeDef status;
+
+	status=HAL_I2C_Mem_Read_DMA(inst->hi2c,(uint16_t)inst->adri2c,AMG8833_T01L,
+			1,data,128);
+
 	return status;
 }

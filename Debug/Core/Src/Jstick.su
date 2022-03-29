@@ -1,0 +1,3 @@
+../Core/Src/Jstick.c:11:6:jstickInit	16	static
+../Core/Src/Jstick.c:15:9:jstickIsLeft	24	static
+../Core/Src/Jstick.c:31:9:jstickIsRight	24	static
