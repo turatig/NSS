@@ -28,6 +28,8 @@
 /*Temperature registers 01/64 low/high - first/last pixel low/high*/
 #define AMG8833_T01L 0x80
 #define AMG8833_T64H 0xFF
+/*Matrix data size in byte*/
+#define AMG8833_DS 128
 
 typedef struct{
 	/*I2C address of the sensor*/

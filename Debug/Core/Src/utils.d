@@ -1,4 +1,4 @@
-Core/Src/Step.o: ../Core/Src/Step.c ../Core/Inc/Step.h \
+Core/Src/utils.o: ../Core/Src/utils.c \
  ../Drivers/CMSIS/Device/ST/STM32F4xx/Include/stm32f4xx.h \
  ../Drivers/CMSIS/Device/ST/STM32F4xx/Include/stm32f407xx.h \
  ../Drivers/CMSIS/Include/core_cm4.h \
@@ -33,7 +33,6 @@ Core/Src/Step.o: ../Core/Src/Step.c ../Core/Inc/Step.h \
  ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_tim_ex.h \
  ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_uart.h \
  ../Core/Inc/utils.h
-../Core/Inc/Step.h:
 ../Drivers/CMSIS/Device/ST/STM32F4xx/Include/stm32f4xx.h:
 ../Drivers/CMSIS/Device/ST/STM32F4xx/Include/stm32f407xx.h:
 ../Drivers/CMSIS/Include/core_cm4.h:

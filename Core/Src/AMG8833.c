@@ -34,8 +34,10 @@ HAL_StatusTypeDef amg8833ReadPoll(AMG8833 *inst,uint8_t *data){
 HAL_StatusTypeDef amg8833ReadDMA(AMG8833 *inst,uint8_t *data){
 	HAL_StatusTypeDef status;
 
-	status=HAL_I2C_Mem_Read_DMA(inst->hi2c,(uint16_t)inst->adri2c,AMG8833_T01L,
-			1,data,128);
+	do{
+		status=HAL_I2C_Mem_Read_DMA(inst->hi2c,(uint16_t)inst->adri2c,AMG8833_T01L,
+			1,data,AMG8833_DS);
+	}while(status!=HAL_OK);
 
 	return status;
 }

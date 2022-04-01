@@ -12,35 +12,13 @@ void jstickInit(Jstick *inst,ADC_HandleTypeDef *hadc){
 	inst->hadc=hadc;
 }
 
-uint8_t jstickIsLeft(Jstick *inst){
-	HAL_StatusTypeDef status;
+JstickDir jstickGetDirection(Jstick *inst){
 	uint16_t raw_val;
-	uint8_t res=0;
+	raw_val=HAL_ADC_GetValue(inst->hadc);
 
-	HAL_ADC_Start(inst->hadc);
-	status=HAL_ADC_PollForConversion(inst->hadc,2000);
+	if(raw_val>4000) return LEFT;
+	if(raw_val<100) return RIGHT;
 
-	if(status==HAL_OK){
-		raw_val=HAL_ADC_GetValue(inst->hadc);
-		if(raw_val>4000) res=1;
-	}
-
-	return res;
+	return CENTER;
 }
 
-uint8_t jstickIsRight(Jstick *inst){
-	HAL_StatusTypeDef status;
-	uint16_t raw_val;
-	uint8_t res=0;
-
-	HAL_ADC_Start(inst->hadc);
-	status=HAL_ADC_PollForConversion(inst->hadc,2000);
-
-	if(status==HAL_OK){
-		raw_val=HAL_ADC_GetValue(inst->hadc);
-		if(raw_val<100) res=1;
-	}
-
-	return res;
-
-}

@@ -36,10 +36,15 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define BIT_BAND_ALIAS 0X22000000
-#define BIT_BAND_ADDR(offset,bit) (BIT_BAND_ALIAS + offset*32 + bit*4)
-#define AMG_CTRL 0x0
-#define AMG_RD 0x7
+#define BIT_BAND_ALIAS_REGION_BASE 0x22000000
+#define BIT_BAND_ADDR(offset,bit) (BIT_BAND_ALIAS_REGION_BASE + offset*32 + bit*4)
+
+/*Thermal camera FSM (based on amg8833 chip) control byte offset in bit band region*/
+#define AMG_CTRL_OSET 0x0
+/*Control bits*/
+#define AMG_RD_START  (*(volatile uint32_t*)BIT_BAND_ADDR(AMG_CTRL_OSET,0x7))//amg read start flag
+#define AMG_RD_CPLT (*(volatile uint32_t*)BIT_BAND_ADDR(AMG_CTRL_OSET,0x6))//amg read complete
+#define AMG_OUT_CPLT (*(volatile uint32_t*)BIT_BAND_ADDR(AMG_CTRL_OSET,0x5))//amg output (through uart) complete. Ready for another read
 
 /* USER CODE END PD */
 
@@ -57,6 +62,7 @@ DMA_HandleTypeDef hdma_i2c1_rx;
 TIM_HandleTypeDef htim6;
 
 UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart2_tx;
 
 /* USER CODE BEGIN PV */
 /* Driver data structure to abstract sensors and their interactions*/
@@ -64,21 +70,20 @@ UART_HandleTypeDef huart2;
 AMG8833 cam;
 Step motor;
 Jstick js;
-uint8_t data[128];
+uint8_t data[AMG8833_DS];
 char msg_buf[25];
 
-/*Flag in the bit band region to command an I2C read from amg8833 sensor*/
-uint32_t *amg_read;
-
+/*Thermal camera FSM based on amg8833 chip control byte*/
+uint8_t AMG_CTRL;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_I2C1_Init(void);
-static void MX_DMA_Init(void);
 static void MX_TIM6_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_DMA_Init(void);
+static void MX_I2C1_Init(void);
 static void MX_ADC3_Init(void);
 /* USER CODE BEGIN PFP */
 
@@ -86,10 +91,16 @@ static void MX_ADC3_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-void MemRxCpltCallback(I2C_HandleTypeDef *hi2c){
-	if( hi2c->Instance == I2C1){
-		HAL_GPIO_TogglePin(GPIOD,GPIO_PIN_15);
-		//HAL_UART_Transmit(&huart2,data,128,HAL_MAX_DELAY);
+
+void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c){
+	if(hi2c->Instance == I2C1){
+		AMG_RD_CPLT=1;
+	}
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart){
+	if(huart->Instance == USART2){
+		AMG_OUT_CPLT=1;
 	}
 }
 /* USER CODE END 0 */
@@ -109,6 +120,7 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
+  HAL_I2C_DeInit(&hi2c1);
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -120,20 +132,27 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_I2C1_Init();
-  MX_DMA_Init();
   MX_TIM6_Init();
   MX_USART2_UART_Init();
+  MX_DMA_Init();
+  MX_I2C1_Init();
   MX_ADC3_Init();
   /* USER CODE BEGIN 2 */
 
+  HAL_DMA_Init(&hdma_i2c1_rx);
+  HAL_DMA_Init(&hdma_usart2_tx);
+
   /*Init amg8833 sensor with ad select pin connected to the ground*/
   amg8833Init(&cam,&hi2c1,0);
-  amg_read=(uint32_t *)BIT_BAND_ADDR(AMG_CTRL,AMG_RD);
+  if(!amg8833IsReady(&cam)) GPIOD->ODR|=GPIO_PIN_14;
+
+  AMG_CTRL=0;
   HAL_TIM_Base_Start_IT(&htim6);
 
   stepInit(&motor,GPIO_PIN_1,GPIO_PIN_2,GPIO_PIN_3,GPIO_PIN_4,GPIOD);
   jstickInit(&js,&hadc3);
+
+  HAL_ADC_Start(&hadc3);
 
   HAL_StatusTypeDef status;
 
@@ -143,29 +162,53 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  GPIOD->ODR&=~( GPIO_PIN_14 | GPIO_PIN_15);
+	  /*
+	   * Thermal camera FSM
+	   */
+	  //If timer6 has expired
+	  if(AMG_RD_START){
+		  //Clear ctrl bit
+		  AMG_RD_START=0;
 
-	  if(jstickIsLeft(&js)){
-		  /*Light red led and step the motor*/
-		  GPIOD->ODR|=GPIO_PIN_14;
-		  stepWave(&motor,0);
+		  //Command DMA transfer from amg8833
+		  status=amg8833ReadDMA(&cam,data);
+
+		  //If error occured flash red led
+		  if(status!=HAL_OK) GPIOD->ODR|=GPIO_PIN_15;
+	   }
+
+	  //If DMA image reading was successful
+	  if(AMG_RD_CPLT){
+		 AMG_RD_CPLT=0;
+
+		 //Command DMA transfer to uart2
+		 status=HAL_UART_Transmit_DMA(&huart2,data,AMG8833_DS);
+		 if(status!=HAL_OK) GPIOD->ODR|=GPIO_PIN_13;
 	  }
-	  if(jstickIsRight(&js)){
-		  /*Light blue led and step the motor*/
-		  GPIOD->ODR|=GPIO_PIN_15;
-		  stepWave(&motor,1);
+
+	  //If output image was consumed
+	  if(AMG_OUT_CPLT){
+		  AMG_OUT_CPLT=0;
+
+		  //Restart timer6
+		  htim6.Instance->CNT=0;
+		  HAL_TIM_Base_Start_IT(&htim6);
+
 	  }
 
-	  /*If timer 6 has expired *amg_read flag is set*/
-	  if(*amg_read && amg8833IsReady(&cam)){
-		  *amg_read=0x0;
-		  //GPIOD->ODR&=~GPIO_PIN_13;
+	  //Read joystick value and (possibly) perform one motor step
+	  status=HAL_ADC_PollForConversion(&hadc3,50);
+	  if(status==HAL_OK){
 
-		  status=amg8833ReadPoll(&cam,data);
-		  if(status==HAL_OK)
-			  HAL_UART_Transmit(&huart2,data,128,HAL_MAX_DELAY);
-		  //sprintf(msg_buf,"I2C read status: %d\r\n",status);
-		  //HAL_UART_Transmit(&huart2,(uint8_t *)msg_buf,strlen(msg_buf),HAL_MAX_DELAY);
+		  switch(jstickGetDirection(&js)){
+		  case LEFT:
+			  stepWave(&motor,0);
+			  break;
+		  case RIGHT:
+			  stepWave(&motor,1);
+			  break;
+		  }
+
 	  }
 
     /* USER CODE END WHILE */
@@ -245,14 +288,14 @@ static void MX_ADC3_Init(void)
   hadc3.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
   hadc3.Init.Resolution = ADC_RESOLUTION_12B;
   hadc3.Init.ScanConvMode = DISABLE;
-  hadc3.Init.ContinuousConvMode = DISABLE;
+  hadc3.Init.ContinuousConvMode = ENABLE;
   hadc3.Init.DiscontinuousConvMode = DISABLE;
   hadc3.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc3.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc3.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc3.Init.NbrOfConversion = 1;
   hadc3.Init.DMAContinuousRequests = DISABLE;
-  hadc3.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc3.Init.EOCSelection = ADC_EOC_SEQ_CONV;
   if (HAL_ADC_Init(&hadc3) != HAL_OK)
   {
     Error_Handler();
@@ -391,6 +434,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Stream0_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+  /* DMA1_Stream6_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream6_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream6_IRQn);
 
 }
 
@@ -409,13 +455,13 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15|GPIO_PIN_1
-                          |GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15
+                          |GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : PD13 PD14 PD15 PD1
-                           PD2 PD3 PD4 */
-  GPIO_InitStruct.Pin = GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15|GPIO_PIN_1
-                          |GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4;
+  /*Configure GPIO pins : PD12 PD13 PD14 PD15
+                           PD1 PD2 PD3 PD4 */
+  GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15
+                          |GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -440,9 +486,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   /* USER CODE BEGIN Callback 0 */
 
 	if(htim->Instance == TIM6){
-		HAL_GPIO_TogglePin(GPIOD,GPIO_PIN_13);
-		*amg_read=0x1;
-
+		HAL_TIM_Base_Stop_IT(htim);
+		AMG_RD_START=1;
 	 }
 
   /* USER CODE END Callback 0 */

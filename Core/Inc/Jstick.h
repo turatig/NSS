@@ -15,9 +15,14 @@ typedef struct{
 	ADC_HandleTypeDef *hadc;
 }Jstick;
 
+typedef enum{
+	CENTER=0x0,
+	LEFT=0x1,
+	RIGHT=0x2
+}JstickDir;
+
 /*hadc in single conversion - single channel mode*/
 void jstickInit(Jstick *inst,ADC_HandleTypeDef *hadc);
-uint8_t jstickIsLeft(Jstick *inst);
-uint8_t jstickIsRight(Jstick *inst);
+JstickDir jstickGetDirection(Jstick *inst);
 
 #endif /* INC_JSTICK_H_ */
