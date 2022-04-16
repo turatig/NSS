@@ -1,2 +1,2 @@
-../Core/Src/Jstick.c:11:6:jstickInit	16	static
-../Core/Src/Jstick.c:15:11:jstickGetDirection	24	static
+../Core/Src/Jstick.c:12:6:jstickInit	24	static
+../Core/Src/Jstick.c:20:11:jstickGetDirection	24	static

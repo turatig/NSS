@@ -54,11 +54,17 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
- ADC_HandleTypeDef hadc3;
+ ADC_HandleTypeDef hadc1;
+ADC_HandleTypeDef hadc3;
+DMA_HandleTypeDef hdma_adc1;
+
+DAC_HandleTypeDef hdac;
+DMA_HandleTypeDef hdma_dac1;
 
 I2C_HandleTypeDef hi2c1;
 DMA_HandleTypeDef hdma_i2c1_rx;
 
+TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim6;
 
 UART_HandleTypeDef huart2;
@@ -70,11 +76,12 @@ DMA_HandleTypeDef hdma_usart2_tx;
 AMG8833 cam;
 Step motor;
 Jstick js;
+
+/*Thermal image buffer*/
 uint8_t data[AMG8833_DS];
 char msg_buf[25];
+HAL_StatusTypeDef status;
 
-/*Thermal camera FSM based on amg8833 chip control byte*/
-uint8_t AMG_CTRL;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -85,6 +92,9 @@ static void MX_USART2_UART_Init(void);
 static void MX_DMA_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_ADC3_Init(void);
+static void MX_ADC1_Init(void);
+static void MX_DAC_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -92,16 +102,75 @@ static void MX_ADC3_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+/*
+ * Handler for thermal image read interrupt after reading
+ */
 void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c){
 	if(hi2c->Instance == I2C1){
 		AMG_RD_CPLT=1;
 	}
 }
 
+
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart){
 	if(huart->Instance == USART2){
 		AMG_OUT_CPLT=1;
 	}
+}
+
+/*Check bits set by:
+ * Timer 6 ISR
+ * DMA1 Stream 0 (Thermal image I2C Rx) Rx Cplt ISR
+ * DMA1 Stream 6 (Thermal image USART2 Tx) Tx Cplt ISR
+ * and subsequently manage Timer 6 reset and DMA transfer sequence
+ */
+void thermalImgFSM(){
+	  /*
+	   * Thermal camera FSM
+	   */
+	  //If timer6 has expired
+	  if(AMG_RD_START){
+		  //Clear ctrl bit
+		  AMG_RD_START=0;
+
+		  //Command DMA transfer from amg8833
+		  status=amg8833ReadDMA(&cam,data);
+
+		  //If error occured flash blue led
+		  if(status!=HAL_OK) GPIOD->ODR|=GPIO_PIN_15;
+	   }
+
+	  //If DMA image reading was successful
+	  if(AMG_RD_CPLT){
+		 AMG_RD_CPLT=0;
+
+		 //Command DMA transfer to uart2
+		 status=HAL_UART_Transmit_DMA(&huart2,data,AMG8833_DS);
+		 if(status!=HAL_OK) GPIOD->ODR|=GPIO_PIN_13;
+	  }
+
+	  //If output image was consumed
+	  if(AMG_OUT_CPLT){
+		  AMG_OUT_CPLT=0;
+
+		  //Restart timer6
+		  htim6.Instance->CNT=0;
+		  HAL_TIM_Base_Start_IT(&htim6);
+
+	  }
+}
+
+void motorControl(){
+	/*Read joystick position and perform one motor step if needed*/
+	switch(jstickGetDirection(&js)){
+	case LEFT:
+		stepWave(&motor,1);
+		break;
+	case RIGHT:
+		stepWave(&motor,0);
+		break;
+	}
+
 }
 /* USER CODE END 0 */
 
@@ -137,6 +206,9 @@ int main(void)
   MX_DMA_Init();
   MX_I2C1_Init();
   MX_ADC3_Init();
+  MX_ADC1_Init();
+  MX_DAC_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
 
   HAL_DMA_Init(&hdma_i2c1_rx);
@@ -144,17 +216,23 @@ int main(void)
 
   /*Init amg8833 sensor with ad select pin connected to the ground*/
   amg8833Init(&cam,&hi2c1,0);
-  if(!amg8833IsReady(&cam)) GPIOD->ODR|=GPIO_PIN_14;
 
-  AMG_CTRL=0;
+  /*Wait until amg8833 is ready*/
+  while(!amg8833IsReady(&cam)) GPIOD->ODR|=GPIO_PIN_14;
+
+  GPIOD->ODR&=~GPIO_PIN_14;
+
+
+  /*Start Timer 6 - Update event every 1/20 s*/
   HAL_TIM_Base_Start_IT(&htim6);
 
+  /*Init step motor data structure*/
   stepInit(&motor,GPIO_PIN_1,GPIO_PIN_2,GPIO_PIN_3,GPIO_PIN_4,GPIOD);
-  jstickInit(&js,&hadc3);
+  /*Init joystick data structure with yellow error pin*/
+  jstickInit(&js,&hadc3,GPIO_PIN_12,GPIOD);
 
+  /*Start ADC3 associated with joystick*/
   HAL_ADC_Start(&hadc3);
-
-  HAL_StatusTypeDef status;
 
   /* USER CODE END 2 */
 
@@ -162,54 +240,9 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  /*
-	   * Thermal camera FSM
-	   */
-	  //If timer6 has expired
-	  if(AMG_RD_START){
-		  //Clear ctrl bit
-		  AMG_RD_START=0;
 
-		  //Command DMA transfer from amg8833
-		  status=amg8833ReadDMA(&cam,data);
-
-		  //If error occured flash red led
-		  if(status!=HAL_OK) GPIOD->ODR|=GPIO_PIN_15;
-	   }
-
-	  //If DMA image reading was successful
-	  if(AMG_RD_CPLT){
-		 AMG_RD_CPLT=0;
-
-		 //Command DMA transfer to uart2
-		 status=HAL_UART_Transmit_DMA(&huart2,data,AMG8833_DS);
-		 if(status!=HAL_OK) GPIOD->ODR|=GPIO_PIN_13;
-	  }
-
-	  //If output image was consumed
-	  if(AMG_OUT_CPLT){
-		  AMG_OUT_CPLT=0;
-
-		  //Restart timer6
-		  htim6.Instance->CNT=0;
-		  HAL_TIM_Base_Start_IT(&htim6);
-
-	  }
-
-	  //Read joystick value and (possibly) perform one motor step
-	  status=HAL_ADC_PollForConversion(&hadc3,50);
-	  if(status==HAL_OK){
-
-		  switch(jstickGetDirection(&js)){
-		  case LEFT:
-			  stepWave(&motor,0);
-			  break;
-		  case RIGHT:
-			  stepWave(&motor,1);
-			  break;
-		  }
-
-	  }
+	  thermalImgFSM();
+	  motorControl();
 
     /* USER CODE END WHILE */
 
@@ -255,13 +288,65 @@ void SystemClock_Config(void)
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV8;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC1_Init(void)
+{
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+
+  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+  */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.ScanConvMode = DISABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
+  hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIGCONV_T2_TRGO;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.NbrOfConversion = 1;
+  hadc1.Init.DMAContinuousRequests = ENABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Rank = 1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
 }
 
 /**
@@ -317,6 +402,46 @@ static void MX_ADC3_Init(void)
 }
 
 /**
+  * @brief DAC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_DAC_Init(void)
+{
+
+  /* USER CODE BEGIN DAC_Init 0 */
+
+  /* USER CODE END DAC_Init 0 */
+
+  DAC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN DAC_Init 1 */
+
+  /* USER CODE END DAC_Init 1 */
+
+  /** DAC Initialization
+  */
+  hdac.Instance = DAC;
+  if (HAL_DAC_Init(&hdac) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** DAC channel OUT1 config
+  */
+  sConfig.DAC_Trigger = DAC_TRIGGER_T2_TRGO;
+  sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
+  if (HAL_DAC_ConfigChannel(&hdac, &sConfig, DAC_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN DAC_Init 2 */
+
+  /* USER CODE END DAC_Init 2 */
+
+}
+
+/**
   * @brief I2C1 Initialization Function
   * @param None
   * @retval None
@@ -347,6 +472,51 @@ static void MX_I2C1_Init(void)
   /* USER CODE BEGIN I2C1_Init 2 */
 
   /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 2;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 256;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
 
 }
 
@@ -429,14 +599,21 @@ static void MX_DMA_Init(void)
 
   /* DMA controller clock enable */
   __HAL_RCC_DMA1_CLK_ENABLE();
+  __HAL_RCC_DMA2_CLK_ENABLE();
 
   /* DMA interrupt init */
   /* DMA1_Stream0_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+  /* DMA1_Stream5_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
   /* DMA1_Stream6_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream6_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream6_IRQn);
+  /* DMA2_Stream0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
 
 }
 
