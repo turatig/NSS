@@ -1,5 +1,6 @@
-../Core/Src/AMG8833.c:12:6:amg8833Init	24	static
-../Core/Src/AMG8833.c:18:9:amg8833IsReady	24	static
-../Core/Src/AMG8833.c:23:9:amg8833IsDMAEnabled	16	static
-../Core/Src/AMG8833.c:27:19:amg8833ReadPoll	40	static
-../Core/Src/AMG8833.c:34:19:amg8833ReadDMA	32	static
+../Core/Src/AMG8833.c:13:6:amg8833Init	24	static
+../Core/Src/AMG8833.c:19:9:amg8833IsReady	24	static
+../Core/Src/AMG8833.c:24:9:amg8833IsDMAEnabled	16	static
+../Core/Src/AMG8833.c:28:19:amg8833ReadPoll	40	static
+../Core/Src/AMG8833.c:35:19:amg8833Reset	40	static
+../Core/Src/AMG8833.c:50:19:amg8833ReadDMA	32	static

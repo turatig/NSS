@@ -25,6 +25,7 @@
 #include "AMG8833.h"
 #include "Step.h"
 #include "Jstick.h"
+#include "utils.h"
 #include <string.h>
 #include <stdio.h>
 /* USER CODE END Includes */
@@ -39,12 +40,22 @@
 #define BIT_BAND_ALIAS_REGION_BASE 0x22000000
 #define BIT_BAND_ADDR(offset,bit) (BIT_BAND_ALIAS_REGION_BASE + offset*32 + bit*4)
 
+/*Audio buffer size*/
+/*Half of the audio buffer is filled by the main playback and process loop*/
+#define AUDIO_BUF_SZ 256
+/*Used by the DMA as unit of transfer*/
+#define AUDIO_TOT_BUF_SZ 512
+
 /*Thermal camera FSM (based on amg8833 chip) control byte offset in bit band region*/
 #define AMG_CTRL_OSET 0x0
 /*Control bits*/
 #define AMG_RD_START  (*(volatile uint32_t*)BIT_BAND_ADDR(AMG_CTRL_OSET,0x7))//amg read start flag
 #define AMG_RD_CPLT (*(volatile uint32_t*)BIT_BAND_ADDR(AMG_CTRL_OSET,0x6))//amg read complete
 #define AMG_OUT_CPLT (*(volatile uint32_t*)BIT_BAND_ADDR(AMG_CTRL_OSET,0x5))//amg output (through uart) complete. Ready for another read
+
+/*Audio control byte offset in bit band region*/
+#define AUDIO_CTRL_OSET 0x1
+#define AUDIO_READY (*(volatile uint32_t*)BIT_BAND_ADDR(AUDIO_CTRL_OSET,0x7))
 
 /* USER CODE END PD */
 
@@ -78,9 +89,21 @@ Step motor;
 Jstick js;
 
 /*Thermal image buffer*/
-uint8_t data[AMG8833_DS];
+uint8_t img_buf[AMG8833_DS];
 char msg_buf[25];
 HAL_StatusTypeDef status;
+
+/*
+ * Audio input and output ping-pong buffers
+ */
+uint16_t audio_in_buf[AUDIO_TOT_BUF_SZ];
+uint16_t audio_out_buf[AUDIO_TOT_BUF_SZ];
+
+/*
+ * Audio buffer pointers switched by the ISR relative to DMA transfer
+ */
+volatile uint16_t *audio_in_ptr;
+volatile uint16_t *audio_out_ptr;
 
 /* USER CODE END PV */
 
@@ -103,7 +126,8 @@ static void MX_TIM2_Init(void);
 /* USER CODE BEGIN 0 */
 
 /*
- * Handler for thermal image read interrupt after reading
+ * Handler for thermal image DMA memory transfer cplt interrupt
+ * Thermal image reading is now complete
  */
 void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c){
 	if(hi2c->Instance == I2C1){
@@ -111,10 +135,47 @@ void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c){
 	}
 }
 
-
+/*
+ * Handler for thermal image DMA memory transfer cplt interrupt
+ * Thermal image output is now complete
+ */
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart){
 	if(huart->Instance == USART2){
 		AMG_OUT_CPLT=1;
+	}
+}
+
+/*
+ * Handler for audio input DMA memory transfer half-cplt interrupt
+ * AUDIO_BUF_SZ sample were converted and put into audio_in_buf.
+ * Main playback loop transfer from lower audio_in_buf to higher audio_out_buf
+ */
+
+void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc){
+	if(hadc->Instance==ADC1){
+		audio_in_ptr=&audio_in_buf[0];
+		audio_out_ptr=&audio_out_buf[AUDIO_BUF_SZ];
+	}
+}
+
+/*
+ * Handler for audio input DMA memory transfer half-cplt interrupt
+ * AUDIO_TOT_BUF_SZ sample were taken from audio out buf and fed into DAC.
+ * Main playback loop transfer from higher audio_in_buf to lower audio_out_buf
+ */
+void HAL_DAC_ConvCpltCallbackCh1(DAC_HandleTypeDef *hdac){
+	audio_in_ptr=&audio_in_buf[AUDIO_BUF_SZ];
+	audio_out_ptr=&audio_out_buf[0];
+}
+
+/*
+ * Audio playback process.
+ * Transfer audio sample from input buffer to output buffer using pointers set by ISR
+ */
+
+void audioPlayback(){
+	for(int i=0;i<AUDIO_BUF_SZ;i++){
+		audio_out_ptr[i]=audio_in_ptr[i];
 	}
 }
 
@@ -134,10 +195,8 @@ void thermalImgFSM(){
 		  AMG_RD_START=0;
 
 		  //Command DMA transfer from amg8833
-		  status=amg8833ReadDMA(&cam,data);
-
-		  //If error occured flash blue led
-		  if(status!=HAL_OK) GPIOD->ODR|=GPIO_PIN_15;
+		status=amg8833ReadDMA(&cam,img_buf);
+		_FL_DEBUG(status,GPIOD,GPIO_PIN_12);
 	   }
 
 	  //If DMA image reading was successful
@@ -145,23 +204,18 @@ void thermalImgFSM(){
 		 AMG_RD_CPLT=0;
 
 		 //Command DMA transfer to uart2
-		 status=HAL_UART_Transmit_DMA(&huart2,data,AMG8833_DS);
-		 if(status!=HAL_OK) GPIOD->ODR|=GPIO_PIN_13;
+		 status=HAL_UART_Transmit_DMA(&huart2,img_buf,AMG8833_DS);
+		 _FL_DEBUG(status,GPIOD,GPIO_PIN_13);
 	  }
-
-	  //If output image was consumed
+	  //if latest data were consumed in output, restart timer6
 	  if(AMG_OUT_CPLT){
 		  AMG_OUT_CPLT=0;
-
-		  //Restart timer6
-		  htim6.Instance->CNT=0;
 		  HAL_TIM_Base_Start_IT(&htim6);
-
 	  }
 }
 
+/*Read joystick position and perform one motor step according to joystick direction*/
 void motorControl(){
-	/*Read joystick position and perform one motor step if needed*/
 	switch(jstickGetDirection(&js)){
 	case LEFT:
 		stepWave(&motor,1);
@@ -211,6 +265,12 @@ int main(void)
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
 
+  //_FL_DEBUG(status,GPIOD,GPIO_PIN_12);
+
+
+  /*
+   * Init DMA handle data structures for thermal image in/out transfer
+   */
   HAL_DMA_Init(&hdma_i2c1_rx);
   HAL_DMA_Init(&hdma_usart2_tx);
 
@@ -218,19 +278,36 @@ int main(void)
   amg8833Init(&cam,&hi2c1,0);
 
   /*Wait until amg8833 is ready*/
-  while(!amg8833IsReady(&cam)) GPIOD->ODR|=GPIO_PIN_14;
+  while(!amg8833IsReady(&cam)){
+	  GPIOD->ODR|=GPIO_PIN_14;
+  }
+
+  /*Set initial value for thermal image fsm ctrl bits*/
+  AMG_OUT_CPLT=1;
+  AMG_RD_START=0;
+  AMG_RD_CPLT=0;
+
 
   GPIOD->ODR&=~GPIO_PIN_14;
-
-
   /*Start Timer 6 - Update event every 1/20 s*/
   HAL_TIM_Base_Start_IT(&htim6);
 
+  /*
+   * Start audio clock
+   */
+  HAL_TIM_Base_Start_IT(&htim2);
+  /*
+   * Start audio DMA continous reading
+   * ADC1 and DAC both works with htim2 conversion clock
+   */
+  HAL_ADC_Start_DMA(&hadc1,(uint32_t*)audio_in_buf,AUDIO_TOT_BUF_SZ);
+  HAL_DAC_Start_DMA(&hdac,DAC_CHANNEL_1,(uint32_t*)audio_out_buf,AUDIO_TOT_BUF_SZ,DAC_ALIGN_12B_R);
+
   /*Init step motor data structure*/
   stepInit(&motor,GPIO_PIN_1,GPIO_PIN_2,GPIO_PIN_3,GPIO_PIN_4,GPIOD);
-  /*Init joystick data structure with yellow error pin*/
-  jstickInit(&js,&hadc3,GPIO_PIN_12,GPIOD);
 
+  /*Init joystick img_buf structure with yellow error pin*/
+  jstickInit(&js,&hadc3,GPIO_PIN_12,GPIOD);
   /*Start ADC3 associated with joystick*/
   HAL_ADC_Start(&hadc3);
 
@@ -241,8 +318,10 @@ int main(void)
   while (1)
   {
 
+	  audioPlayback();
 	  thermalImgFSM();
 	  motorControl();
+
 
     /* USER CODE END WHILE */
 
@@ -336,7 +415,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Channel = ADC_CHANNEL_5;
   sConfig.Rank = 1;
   sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
@@ -494,11 +573,11 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 2;
+  htim2.Init.Prescaler = 1;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 256;
+  htim2.Init.Period = 255;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
   {
     Error_Handler();
@@ -508,7 +587,7 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
   if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
   {
@@ -541,7 +620,7 @@ static void MX_TIM6_Init(void)
   htim6.Init.Prescaler = 9;
   htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim6.Init.Period = 65535;
-  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
   {
     Error_Handler();
@@ -663,7 +742,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   /* USER CODE BEGIN Callback 0 */
 
 	if(htim->Instance == TIM6){
-		HAL_TIM_Base_Stop_IT(htim);
 		AMG_RD_START=1;
 	 }
 
