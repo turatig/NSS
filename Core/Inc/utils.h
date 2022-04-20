@@ -11,6 +11,9 @@
 /*Flash error led debug macro*/
 #define _FL_DEBUG(status,port,pin) if(status!=HAL_OK){\
 		port->ODR|=pin;\
+	}\
+	else{\
+		port->ODR&=~pin;\
 	}
 #define _FL_EQ_DEBUG(status,value,port,pin) if(status==value){\
 		port->ODR|=pin;\

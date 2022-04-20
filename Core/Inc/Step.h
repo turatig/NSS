@@ -15,11 +15,12 @@ typedef struct{
 	/*Driver pin masks*/
 	uint16_t pins[4];
 	/*Address of gpio port*/
-	GPIO_TypeDef *gpio_port;
+	GPIO_TypeDef *port;
+	/*Angle: measured in step resolution unit with respect to an initial value*/
 }Step;
 
 /*Init motor data structure from pin numbers and gpio port specification*/
-void stepInit(Step *inst,uint16_t p1,uint16_t p2,uint16_t p3,uint16_t p4,GPIO_TypeDef *gp);
+void stepInit(Step *inst,uint16_t p0,uint16_t p1,uint16_t p2,uint16_t p3,GPIO_TypeDef *port);
 
 /*Perform a step in wave_step mode -- dir: boolean directions (forward/backward)*/
 void stepWave(Step *inst,uint8_t dir);

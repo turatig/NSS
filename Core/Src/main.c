@@ -66,11 +66,14 @@
 
 /* Private variables ---------------------------------------------------------*/
  ADC_HandleTypeDef hadc1;
+ADC_HandleTypeDef hadc2;
 ADC_HandleTypeDef hadc3;
 DMA_HandleTypeDef hdma_adc1;
+DMA_HandleTypeDef hdma_adc2;
 
 DAC_HandleTypeDef hdac;
 DMA_HandleTypeDef hdma_dac1;
+DMA_HandleTypeDef hdma_dac2;
 
 I2C_HandleTypeDef hi2c1;
 DMA_HandleTypeDef hdma_i2c1_rx;
@@ -78,8 +81,8 @@ DMA_HandleTypeDef hdma_i2c1_rx;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim6;
 
-UART_HandleTypeDef huart2;
-DMA_HandleTypeDef hdma_usart2_tx;
+UART_HandleTypeDef huart3;
+DMA_HandleTypeDef hdma_usart3_tx;
 
 /* USER CODE BEGIN PV */
 /* Driver data structure to abstract sensors and their interactions*/
@@ -96,14 +99,20 @@ HAL_StatusTypeDef status;
 /*
  * Audio input and output ping-pong buffers
  */
-uint16_t audio_in_buf[AUDIO_TOT_BUF_SZ];
-uint16_t audio_out_buf[AUDIO_TOT_BUF_SZ];
+uint16_t audio_in_buf1[AUDIO_TOT_BUF_SZ];
+uint16_t audio_out_buf1[AUDIO_TOT_BUF_SZ];
+
+uint16_t audio_in_buf2[AUDIO_TOT_BUF_SZ];
+uint16_t audio_out_buf2[AUDIO_TOT_BUF_SZ];
 
 /*
  * Audio buffer pointers switched by the ISR relative to DMA transfer
  */
-volatile uint16_t *audio_in_ptr;
-volatile uint16_t *audio_out_ptr;
+volatile uint16_t *audio_in_ptr1;
+volatile uint16_t *audio_out_ptr1;
+
+volatile uint16_t *audio_in_ptr2;
+volatile uint16_t *audio_out_ptr2;
 
 /* USER CODE END PV */
 
@@ -111,13 +120,14 @@ volatile uint16_t *audio_out_ptr;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_TIM6_Init(void);
-static void MX_USART2_UART_Init(void);
 static void MX_DMA_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_ADC3_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_DAC_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_ADC2_Init(void);
+static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -140,7 +150,7 @@ void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c){
  * Thermal image output is now complete
  */
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart){
-	if(huart->Instance == USART2){
+	if(huart->Instance == USART3){
 		AMG_OUT_CPLT=1;
 	}
 }
@@ -153,8 +163,13 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart){
 
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc){
 	if(hadc->Instance==ADC1){
-		audio_in_ptr=&audio_in_buf[0];
-		audio_out_ptr=&audio_out_buf[AUDIO_BUF_SZ];
+		audio_in_ptr1=&audio_in_buf1[0];
+		audio_out_ptr1=&audio_out_buf1[AUDIO_BUF_SZ];
+	}
+
+	if(hadc->Instance==ADC2){
+		audio_in_ptr2=&audio_in_buf2[0];
+		audio_out_ptr2=&audio_out_buf2[AUDIO_BUF_SZ];
 	}
 }
 
@@ -164,8 +179,11 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc){
  * Main playback loop transfer from higher audio_in_buf to lower audio_out_buf
  */
 void HAL_DAC_ConvCpltCallbackCh1(DAC_HandleTypeDef *hdac){
-	audio_in_ptr=&audio_in_buf[AUDIO_BUF_SZ];
-	audio_out_ptr=&audio_out_buf[0];
+	audio_in_ptr1=&audio_in_buf1[AUDIO_BUF_SZ];
+	audio_out_ptr1=&audio_out_buf1[0];
+
+	audio_in_ptr2=&audio_in_buf2[AUDIO_BUF_SZ];
+	audio_out_ptr2=&audio_out_buf2[0];
 }
 
 /*
@@ -175,7 +193,8 @@ void HAL_DAC_ConvCpltCallbackCh1(DAC_HandleTypeDef *hdac){
 
 void audioPlayback(){
 	for(int i=0;i<AUDIO_BUF_SZ;i++){
-		audio_out_ptr[i]=audio_in_ptr[i];
+		audio_out_ptr1[i]=audio_in_ptr1[i];
+		audio_out_ptr2[i]=audio_in_ptr2[i];
 	}
 }
 
@@ -191,21 +210,25 @@ void thermalImgFSM(){
 	   */
 	  //If timer6 has expired
 	  if(AMG_RD_START){
-		  //Clear ctrl bit
-		  AMG_RD_START=0;
 
 		  //Command DMA transfer from amg8833
 		status=amg8833ReadDMA(&cam,img_buf);
 		_FL_DEBUG(status,GPIOD,GPIO_PIN_12);
+		if(status==HAL_OK)
+			  //Clear ctrl bit
+			  AMG_RD_START=0;
 	   }
 
 	  //If DMA image reading was successful
 	  if(AMG_RD_CPLT){
-		 AMG_RD_CPLT=0;
 
 		 //Command DMA transfer to uart2
-		 status=HAL_UART_Transmit_DMA(&huart2,img_buf,AMG8833_DS);
+		 status=HAL_UART_Transmit_DMA(&huart3,img_buf,AMG8833_DS);
 		 _FL_DEBUG(status,GPIOD,GPIO_PIN_13);
+		 //_FL_EQ_DEBUG(status,HAL_BUSY,GPIOD,GPIO_PIN_15);
+		 if(status==HAL_OK){
+			 AMG_RD_CPLT=0;
+		 }
 	  }
 	  //if latest data were consumed in output, restart timer6
 	  if(AMG_OUT_CPLT){
@@ -243,7 +266,6 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-  HAL_I2C_DeInit(&hi2c1);
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -256,13 +278,14 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_TIM6_Init();
-  MX_USART2_UART_Init();
   MX_DMA_Init();
   MX_I2C1_Init();
   MX_ADC3_Init();
   MX_ADC1_Init();
   MX_DAC_Init();
   MX_TIM2_Init();
+  MX_ADC2_Init();
+  MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
 
   //_FL_DEBUG(status,GPIOD,GPIO_PIN_12);
@@ -272,7 +295,7 @@ int main(void)
    * Init DMA handle data structures for thermal image in/out transfer
    */
   HAL_DMA_Init(&hdma_i2c1_rx);
-  HAL_DMA_Init(&hdma_usart2_tx);
+  HAL_DMA_Init(&hdma_usart3_tx);
 
   /*Init amg8833 sensor with ad select pin connected to the ground*/
   amg8833Init(&cam,&hi2c1,0);
@@ -281,12 +304,6 @@ int main(void)
   while(!amg8833IsReady(&cam)){
 	  GPIOD->ODR|=GPIO_PIN_14;
   }
-
-  /*Set initial value for thermal image fsm ctrl bits*/
-  AMG_OUT_CPLT=1;
-  AMG_RD_START=0;
-  AMG_RD_CPLT=0;
-
 
   GPIOD->ODR&=~GPIO_PIN_14;
   /*Start Timer 6 - Update event every 1/20 s*/
@@ -300,8 +317,11 @@ int main(void)
    * Start audio DMA continous reading
    * ADC1 and DAC both works with htim2 conversion clock
    */
-  HAL_ADC_Start_DMA(&hadc1,(uint32_t*)audio_in_buf,AUDIO_TOT_BUF_SZ);
-  HAL_DAC_Start_DMA(&hdac,DAC_CHANNEL_1,(uint32_t*)audio_out_buf,AUDIO_TOT_BUF_SZ,DAC_ALIGN_12B_R);
+  HAL_ADC_Start_DMA(&hadc1,(uint32_t*)audio_in_buf1,AUDIO_TOT_BUF_SZ);
+  HAL_ADC_Start_DMA(&hadc2,(uint32_t*)audio_in_buf2,AUDIO_TOT_BUF_SZ);
+
+  HAL_DAC_Start_DMA(&hdac,DAC_CHANNEL_1,(uint32_t*)audio_out_buf1,AUDIO_TOT_BUF_SZ,DAC_ALIGN_12B_R);
+  HAL_DAC_Start_DMA(&hdac,DAC_CHANNEL_2,(uint32_t*)audio_out_buf2,AUDIO_TOT_BUF_SZ,DAC_ALIGN_12B_R);
 
   /*Init step motor data structure*/
   stepInit(&motor,GPIO_PIN_1,GPIO_PIN_2,GPIO_PIN_3,GPIO_PIN_4,GPIOD);
@@ -321,7 +341,6 @@ int main(void)
 	  audioPlayback();
 	  thermalImgFSM();
 	  motorControl();
-
 
     /* USER CODE END WHILE */
 
@@ -415,7 +434,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_5;
+  sConfig.Channel = ADC_CHANNEL_6;
   sConfig.Rank = 1;
   sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
@@ -425,6 +444,58 @@ static void MX_ADC1_Init(void)
   /* USER CODE BEGIN ADC1_Init 2 */
 
   /* USER CODE END ADC1_Init 2 */
+
+}
+
+/**
+  * @brief ADC2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC2_Init(void)
+{
+
+  /* USER CODE BEGIN ADC2_Init 0 */
+
+  /* USER CODE END ADC2_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC2_Init 1 */
+
+  /* USER CODE END ADC2_Init 1 */
+
+  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+  */
+  hadc2.Instance = ADC2;
+  hadc2.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
+  hadc2.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc2.Init.ScanConvMode = DISABLE;
+  hadc2.Init.ContinuousConvMode = DISABLE;
+  hadc2.Init.DiscontinuousConvMode = DISABLE;
+  hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
+  hadc2.Init.ExternalTrigConv = ADC_EXTERNALTRIGCONV_T2_TRGO;
+  hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc2.Init.NbrOfConversion = 1;
+  hadc2.Init.DMAContinuousRequests = ENABLE;
+  hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  if (HAL_ADC_Init(&hadc2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_7;
+  sConfig.Rank = 1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC2_Init 2 */
+
+  /* USER CODE END ADC2_Init 2 */
 
 }
 
@@ -511,6 +582,13 @@ static void MX_DAC_Init(void)
   sConfig.DAC_Trigger = DAC_TRIGGER_T2_TRGO;
   sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
   if (HAL_DAC_ConfigChannel(&hdac, &sConfig, DAC_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** DAC channel OUT2 config
+  */
+  if (HAL_DAC_ConfigChannel(&hdac, &sConfig, DAC_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -638,35 +716,35 @@ static void MX_TIM6_Init(void)
 }
 
 /**
-  * @brief USART2 Initialization Function
+  * @brief USART3 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_USART2_UART_Init(void)
+static void MX_USART3_UART_Init(void)
 {
 
-  /* USER CODE BEGIN USART2_Init 0 */
+  /* USER CODE BEGIN USART3_Init 0 */
 
-  /* USER CODE END USART2_Init 0 */
+  /* USER CODE END USART3_Init 0 */
 
-  /* USER CODE BEGIN USART2_Init 1 */
+  /* USER CODE BEGIN USART3_Init 1 */
 
-  /* USER CODE END USART2_Init 1 */
-  huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
-  huart2.Init.WordLength = UART_WORDLENGTH_8B;
-  huart2.Init.StopBits = UART_STOPBITS_1;
-  huart2.Init.Parity = UART_PARITY_NONE;
-  huart2.Init.Mode = UART_MODE_TX_RX;
-  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart2) != HAL_OK)
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart3) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN USART2_Init 2 */
+  /* USER CODE BEGIN USART3_Init 2 */
 
-  /* USER CODE END USART2_Init 2 */
+  /* USER CODE END USART3_Init 2 */
 
 }
 
@@ -684,6 +762,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Stream0_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+  /* DMA1_Stream3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream3_IRQn);
   /* DMA1_Stream5_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
@@ -693,6 +774,9 @@ static void MX_DMA_Init(void)
   /* DMA2_Stream0_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
+  /* DMA2_Stream2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream2_IRQn);
 
 }
 
@@ -707,8 +791,8 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15
