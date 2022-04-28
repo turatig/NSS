@@ -8,28 +8,43 @@
 #include "utils.h"
 #include "stm32f4xx.h"
 
-void stepInit(Step *inst,uint16_t p0,uint16_t p1,uint16_t p2,uint16_t p3,GPIO_TypeDef *port){
+void initStep(Step *inst,uint16_t p0,uint16_t p1,uint16_t p2,uint16_t p3,GPIO_TypeDef *port){
 	inst->pins[0]=p0;
 	inst->pins[1]=p1;
 	inst->pins[2]=p2;
 	inst->pins[3]=p3;
 
 	inst->port=port;
-	inst->port->ODR&=~( inst->pins[0] | inst->pins[1] | inst->pins[2] | inst->pins[3] );
+	inst->cur_step=0;
+	rstPins(inst);
+	rstAngle(inst);
+}
 
+void rstPins(Step *inst){
+	inst->port->ODR&=~( inst->pins[0] | inst->pins[1] | inst->pins[2] | inst->pins[3] );
+}
+
+void rstAngle(Step *inst){
+	inst->ang_idx=0;
 }
 
 /*if dir activate pins backward[pin 4-0] else forward[pin 0-4] in wave step mode*/
-void stepWave(Step *inst,uint8_t dir){
+void waveStep(Step *inst,uint8_t dir){
 
-	inst->port->ODR&=~( inst->pins[0] | inst->pins[1] | inst->pins[2] | inst->pins[3] );
-	inst->port->ODR|=inst->pins[0];
+	/*Reset current step pin*/
+	inst->port->ODR&= ~(inst->pins[ inst->cur_step ]);
 
-	for(int i=0;i<4;i++){
-		inst->port->ODR&=~inst->pins[ dir ? (4-i) & 3 : i ];
-		inst->port->ODR|=inst->pins[ dir ? 3-i : (i+1) & 3 ];
-
-		//delayUS(500);
-		HAL_Delay(2);
+	/*Update current step and angular index according to given direction*/
+	if(dir){
+		inst->cur_step=(inst->cur_step + 1) & 0x3;
+		inst->ang_idx ++;
 	}
+	else{
+		inst->cur_step=(inst->cur_step - 1) & 0x3;
+		inst->ang_idx --;
+	}
+
+	/*Set updated current step pin*/
+	inst->port->ODR|= inst->pins[ inst->cur_step ];
 }
+

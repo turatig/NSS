@@ -54,8 +54,8 @@
 #define AMG_OUT_CPLT (*(volatile uint32_t*)BIT_BAND_ADDR(AMG_CTRL_OSET,0x5))//amg output (through uart) complete. Ready for another read
 
 /*Audio control byte offset in bit band region*/
-#define AUDIO_CTRL_OSET 0x1
-#define AUDIO_READY (*(volatile uint32_t*)BIT_BAND_ADDR(AUDIO_CTRL_OSET,0x7))
+#define MOTOR_CTRL_OSET 0x1
+#define MOTOR_MV (*(volatile uint32_t*)BIT_BAND_ADDR(MOTOR_CTRL_OSET,0x7))
 
 /* USER CODE END PD */
 
@@ -80,6 +80,7 @@ DMA_HandleTypeDef hdma_i2c1_rx;
 
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim6;
+TIM_HandleTypeDef htim7;
 
 UART_HandleTypeDef huart3;
 DMA_HandleTypeDef hdma_usart3_tx;
@@ -128,6 +129,7 @@ static void MX_DAC_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_ADC2_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_TIM7_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -181,7 +183,9 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc){
 void HAL_DAC_ConvCpltCallbackCh1(DAC_HandleTypeDef *hdac){
 	audio_in_ptr1=&audio_in_buf1[AUDIO_BUF_SZ];
 	audio_out_ptr1=&audio_out_buf1[0];
+}
 
+void HAL_DACEx_ConvCpltCallbackCh2(DAC_HandleTypeDef *hdac){
 	audio_in_ptr2=&audio_in_buf2[AUDIO_BUF_SZ];
 	audio_out_ptr2=&audio_out_buf2[0];
 }
@@ -224,7 +228,7 @@ void thermalImgFSM(){
 
 		 //Command DMA transfer to uart2
 		 status=HAL_UART_Transmit_DMA(&huart3,img_buf,AMG8833_DS);
-		 _FL_DEBUG(status,GPIOD,GPIO_PIN_13);
+		 //_FL_DEBUG(status,GPIOD,GPIO_PIN_13);
 		 //_FL_EQ_DEBUG(status,HAL_BUSY,GPIOD,GPIO_PIN_15);
 		 if(status==HAL_OK){
 			 AMG_RD_CPLT=0;
@@ -239,13 +243,19 @@ void thermalImgFSM(){
 
 /*Read joystick position and perform one motor step according to joystick direction*/
 void motorControl(){
-	switch(jstickGetDirection(&js)){
-	case LEFT:
-		stepWave(&motor,1);
-		break;
-	case RIGHT:
-		stepWave(&motor,0);
-		break;
+
+	if(MOTOR_MV){
+		MOTOR_MV=0;
+		switch(jstickGetDirection(&js)){
+		case LEFT:
+			waveStep(&motor,1);
+			break;
+		case RIGHT:
+			waveStep(&motor,0);
+			break;
+		}
+		//sprintf(msg_buf,"%d\r\n",motor.cur_step);
+		//HAL_UART_Transmit(&huart3,(uint8_t*)msg_buf,strlen(msg_buf),HAL_MAX_DELAY);
 	}
 
 }
@@ -286,6 +296,7 @@ int main(void)
   MX_TIM2_Init();
   MX_ADC2_Init();
   MX_USART3_UART_Init();
+  MX_TIM7_Init();
   /* USER CODE BEGIN 2 */
 
   //_FL_DEBUG(status,GPIOD,GPIO_PIN_12);
@@ -306,8 +317,10 @@ int main(void)
   }
 
   GPIOD->ODR&=~GPIO_PIN_14;
-  /*Start Timer 6 - Update event every 1/20 s*/
+  /*Start Timer 6 - Update event every 1/20 s for thermal camera reading*/
   HAL_TIM_Base_Start_IT(&htim6);
+  /*Start Timer 7 - Update event every 1/10 s for motor control*/
+  HAL_TIM_Base_Start_IT(&htim7);
 
   /*
    * Start audio clock
@@ -324,7 +337,7 @@ int main(void)
   HAL_DAC_Start_DMA(&hdac,DAC_CHANNEL_2,(uint32_t*)audio_out_buf2,AUDIO_TOT_BUF_SZ,DAC_ALIGN_12B_R);
 
   /*Init step motor data structure*/
-  stepInit(&motor,GPIO_PIN_1,GPIO_PIN_2,GPIO_PIN_3,GPIO_PIN_4,GPIOD);
+  initStep(&motor,GPIO_PIN_1,GPIO_PIN_2,GPIO_PIN_3,GPIO_PIN_4,GPIOD);
 
   /*Init joystick img_buf structure with yellow error pin*/
   jstickInit(&js,&hadc3,GPIO_PIN_12,GPIOD);
@@ -538,7 +551,7 @@ static void MX_ADC3_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_0;
+  sConfig.Channel = ADC_CHANNEL_1;
   sConfig.Rank = 1;
   sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc3, &sConfig) != HAL_OK)
@@ -716,6 +729,44 @@ static void MX_TIM6_Init(void)
 }
 
 /**
+  * @brief TIM7 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM7_Init(void)
+{
+
+  /* USER CODE BEGIN TIM7_Init 0 */
+
+  /* USER CODE END TIM7_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM7_Init 1 */
+
+  /* USER CODE END TIM7_Init 1 */
+  htim7.Instance = TIM7;
+  htim7.Init.Prescaler = 0;
+  htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim7.Init.Period = 62499;
+  htim7.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim7) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim7, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM7_Init 2 */
+
+  /* USER CODE END TIM7_Init 2 */
+
+}
+
+/**
   * @brief USART3 Initialization Function
   * @param None
   * @retval None
@@ -798,6 +849,12 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15
                           |GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4, GPIO_PIN_RESET);
 
+  /*Configure GPIO pin : PA0 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
   /*Configure GPIO pins : PD12 PD13 PD14 PD15
                            PD1 PD2 PD3 PD4 */
   GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15
@@ -807,9 +864,22 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+
 }
 
 /* USER CODE BEGIN 4 */
+
+/*
+ * Callback function to manage the blue button pushed event
+ */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_PIN){
+	if(GPIO_PIN==GPIO_PIN_0){
+		GPIOD->ODR^=GPIO_PIN_13;
+	}
+}
 
 /* USER CODE END 4 */
 
@@ -825,6 +895,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   /* USER CODE BEGIN Callback 0 */
 
+	if(htim->Instance == TIM7){
+		MOTOR_MV=1;
+	}
 	if(htim->Instance == TIM6){
 		AMG_RD_START=1;
 	 }
