@@ -1,4 +1,9 @@
 ../Core/Src/Step.c:11:6:initStep	24	static
-../Core/Src/Step.c:23:6:rstPins	16	static
-../Core/Src/Step.c:27:6:rstAngle	16	static
-../Core/Src/Step.c:32:6:waveStep	16	static
+../Core/Src/Step.c:23:6:initMode	16	static
+../Core/Src/Step.c:32:6:rstPins	16	static
+../Core/Src/Step.c:36:6:rstAngle	16	static
+../Core/Src/Step.c:49:6:waveStep	16	static
+../Core/Src/Step.c:76:6:fullStep	16	static
+../Core/Src/Step.c:112:6:halfStep	16	static,ignoring_inline_asm
+../Core/Src/Step.c:117:6:step	16	static
+../Core/Src/Step.c:127:6:moveToPoll	16	static

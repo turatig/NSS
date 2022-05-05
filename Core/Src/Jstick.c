@@ -10,7 +10,7 @@
 #include "utils.h"
 
 
-void jstickInit(Jstick *inst,ADC_HandleTypeDef *hadc,uint16_t errpin,GPIO_TypeDef *errport){
+void initJstick(Jstick *inst,ADC_HandleTypeDef *hadc,uint16_t errpin,GPIO_TypeDef *errport){
 	inst->hadc=hadc;
 	inst->errpin=errpin;
 	inst->errport=errport;
@@ -18,13 +18,12 @@ void jstickInit(Jstick *inst,ADC_HandleTypeDef *hadc,uint16_t errpin,GPIO_TypeDe
 }
 
 
-JstickDir jstickGetDirection(Jstick *inst){
+JstickDir jstickGetDirPoll(Jstick *inst){
 	uint16_t raw_val;
 	HAL_StatusTypeDef status;
 
 	status=HAL_ADC_PollForConversion(inst->hadc,50);
 
-	_FL_DEBUG(status,inst->errport,inst->errpin);
 	if(status==HAL_OK){
 		raw_val=HAL_ADC_GetValue(inst->hadc);
 

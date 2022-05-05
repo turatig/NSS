@@ -61,7 +61,7 @@ main-build: thermal_camera.elf secondary-outputs
 
 # Tool invocations
 thermal_camera.elf thermal_camera.map: $(OBJS) $(USER_OBJS) /home/jack/STM32CubeIDE/workspace_1.7.0/thermal_camera/STM32F407VGTX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "thermal_camera.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"/home/jack/STM32CubeIDE/workspace_1.7.0/thermal_camera/STM32F407VGTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="thermal_camera.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+	arm-none-eabi-gcc -o "thermal_camera.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"/home/jack/STM32CubeIDE/workspace_1.7.0/thermal_camera/STM32F407VGTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="thermal_camera.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -u _printf_float -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 

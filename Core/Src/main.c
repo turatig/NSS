@@ -40,12 +40,6 @@
 #define BIT_BAND_ALIAS_REGION_BASE 0x22000000
 #define BIT_BAND_ADDR(offset,bit) (BIT_BAND_ALIAS_REGION_BASE + offset*32 + bit*4)
 
-/*Audio buffer size*/
-/*Half of the audio buffer is filled by the main playback and process loop*/
-#define AUDIO_BUF_SZ 256
-/*Used by the DMA as unit of transfer*/
-#define AUDIO_TOT_BUF_SZ 512
-
 /*Thermal camera FSM (based on amg8833 chip) control byte offset in bit band region*/
 #define AMG_CTRL_OSET 0x0
 /*Control bits*/
@@ -53,9 +47,37 @@
 #define AMG_RD_CPLT (*(volatile uint32_t*)BIT_BAND_ADDR(AMG_CTRL_OSET,0x6))//amg read complete
 #define AMG_OUT_CPLT (*(volatile uint32_t*)BIT_BAND_ADDR(AMG_CTRL_OSET,0x5))//amg output (through uart) complete. Ready for another read
 
-/*Audio control byte offset in bit band region*/
+/*Motor control byte offset in bit band region*/
 #define MOTOR_CTRL_OSET 0x1
 #define MOTOR_MV (*(volatile uint32_t*)BIT_BAND_ADDR(MOTOR_CTRL_OSET,0x7))
+
+/*Audio control byte offset in bit band region*/
+#define AUDIO_CTRL_OSET 0x2
+#define BUF1_CPLT (*(volatile uint32_t*)BIT_BAND_ADDR(AUDIO_CTRL_OSET,0x7))
+#define BUF2_CPLT (*(volatile uint32_t*)BIT_BAND_ADDR(AUDIO_CTRL_OSET,0x6))
+#define OVR_THRS (*(volatile uint32_t*)BIT_BAND_ADDR(AUDIO_CTRL_OSET,0x5))
+
+/*Push buttons control byte offset in bit band region*/
+#define EXTI_BUT_CTRL_OSET 0x3
+#define EXTI_BUT_PUSH (*(volatile uint32_t*)BIT_BAND_ADDR(EXTI_BUT_CTRL_OSET,0x7))
+
+#define MODE_TOGGLE (*(volatile uint32_t*)BIT_BAND_ADDR(EXTI_BUT_CTRL_OSET,0x6))
+#define LEFT_BUT_PUSH (*(volatile uint32_t*)BIT_BAND_ADDR(EXTI_BUT_CTRL_OSET,0x5))
+#define RIGHT_BUT_PUSH (*(volatile uint32_t*)BIT_BAND_ADDR(EXTI_BUT_CTRL_OSET,0x4))
+
+
+/*Audio buffer size*/
+/*Half of the audio buffer is filled by the main playback and process loop*/
+#define AUDIO_BUF_SZ 256
+/*Used by the DMA as unit of transfer*/
+#define AUDIO_TOT_BUF_SZ (AUDIO_BUF_SZ * 2)
+
+/*
+ * Debug macros
+ * remove comments to debug single components
+ */
+//#define DAC_DEBUG 1
+//#define DEBUG_LOG 1
 
 /* USER CODE END PD */
 
@@ -81,9 +103,12 @@ DMA_HandleTypeDef hdma_i2c1_rx;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim6;
 TIM_HandleTypeDef htim7;
+TIM_HandleTypeDef htim10;
 
 UART_HandleTypeDef huart3;
+UART_HandleTypeDef huart6;
 DMA_HandleTypeDef hdma_usart3_tx;
+DMA_HandleTypeDef hdma_usart6_tx;
 
 /* USER CODE BEGIN PV */
 /* Driver data structure to abstract sensors and their interactions*/
@@ -106,6 +131,26 @@ uint16_t audio_out_buf1[AUDIO_TOT_BUF_SZ];
 uint16_t audio_in_buf2[AUDIO_TOT_BUF_SZ];
 uint16_t audio_out_buf2[AUDIO_TOT_BUF_SZ];
 
+#ifdef DAC_DEBUG
+	uint16_t square_wv[AUDIO_TOT_BUF_SZ];
+
+	//Test DAC channels reproducing a square wave
+	void testDAC(){
+		for(int i=0; i<AUDIO_TOT_BUF_SZ; i++){
+			if(i>AUDIO_BUF_SZ)
+				square_wv[i]=0;
+			else
+				square_wv[i]=2048;
+		}
+		HAL_TIM_Base_Start_IT(&htim2);
+		HAL_DAC_Start_DMA(&hdac,DAC_CHANNEL_1,(uint32_t*)square_wv,AUDIO_TOT_BUF_SZ,DAC_ALIGN_12B_R);
+		HAL_DAC_Start_DMA(&hdac,DAC_CHANNEL_2,(uint32_t*)square_wv,AUDIO_TOT_BUF_SZ,DAC_ALIGN_12B_R);
+		while(1){
+			__NOP();
+		}
+	}
+#endif
+
 /*
  * Audio buffer pointers switched by the ISR relative to DMA transfer
  */
@@ -115,6 +160,9 @@ volatile uint16_t *audio_out_ptr1;
 volatile uint16_t *audio_in_ptr2;
 volatile uint16_t *audio_out_ptr2;
 
+uint16_t threshold;
+/*Mode bit set by the main loop*/
+uint8_t mode;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -130,6 +178,8 @@ static void MX_TIM2_Init(void);
 static void MX_ADC2_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_TIM7_Init(void);
+static void MX_USART6_UART_Init(void);
+static void MX_TIM10_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -137,6 +187,16 @@ static void MX_TIM7_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+/*
+ * Callback function to manage external interrupt push buttons pushed
+ */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_PIN){
+	if( !EXTI_BUT_PUSH ){
+		EXTI_BUT_PUSH=1;
+		//Start debounce timer: interrupt after 50 ms
+		HAL_TIM_Base_Start_IT(&htim10);
+	}
+}
 /*
  * Handler for thermal image DMA memory transfer cplt interrupt
  * Thermal image reading is now complete
@@ -167,11 +227,13 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc){
 	if(hadc->Instance==ADC1){
 		audio_in_ptr1=&audio_in_buf1[0];
 		audio_out_ptr1=&audio_out_buf1[AUDIO_BUF_SZ];
+		BUF1_CPLT=1;
 	}
 
 	if(hadc->Instance==ADC2){
 		audio_in_ptr2=&audio_in_buf2[0];
 		audio_out_ptr2=&audio_out_buf2[AUDIO_BUF_SZ];
+		BUF2_CPLT=1;
 	}
 }
 
@@ -183,11 +245,13 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc){
 void HAL_DAC_ConvCpltCallbackCh1(DAC_HandleTypeDef *hdac){
 	audio_in_ptr1=&audio_in_buf1[AUDIO_BUF_SZ];
 	audio_out_ptr1=&audio_out_buf1[0];
+	BUF1_CPLT=1;
 }
 
 void HAL_DACEx_ConvCpltCallbackCh2(DAC_HandleTypeDef *hdac){
 	audio_in_ptr2=&audio_in_buf2[AUDIO_BUF_SZ];
 	audio_out_ptr2=&audio_out_buf2[0];
+	BUF2_CPLT=1;
 }
 
 /*
@@ -196,9 +260,36 @@ void HAL_DACEx_ConvCpltCallbackCh2(DAC_HandleTypeDef *hdac){
  */
 
 void audioPlayback(){
-	for(int i=0;i<AUDIO_BUF_SZ;i++){
-		audio_out_ptr1[i]=audio_in_ptr1[i];
-		audio_out_ptr2[i]=audio_in_ptr2[i];
+
+/*If debug logging is on, compute mean value of buffers and transmit on UART6*/
+#ifdef DEBUG_LOG
+	uint32_t mean_ch1=0;
+	uint32_t mean_ch2=0;
+#endif
+
+	/*If channel 1 and 2 conversion was completed*/
+	if(BUF1_CPLT && BUF2_CPLT){
+		BUF1_CPLT=0;
+		BUF2_CPLT=0;
+
+		/*Transfer samples from input to output buffers*/
+		for(int i=0;i<AUDIO_BUF_SZ;i++){
+			audio_out_ptr1[i]=audio_in_ptr1[i];
+			audio_out_ptr2[i]=audio_in_ptr2[i];
+
+#ifdef DEBUG_LOG
+			mean_ch1+=audio_out_ptr1[i];
+			mean_ch2+=audio_out_ptr2[i];
+#endif
+		}
+#ifdef DEBUG_LOG
+		mean_ch1/=AUDIO_BUF_SZ;
+		mean_ch2/=AUDIO_BUF_SZ;
+
+		sprintf(msg_buf,"Channel 1 mean: %hu\r\nChannel 2 mean:%hu\r\n\r\n\r\n",mean_ch1,mean_ch2);
+		HAL_UART_Transmit_DMA(&huart6,(uint8_t*)msg_buf,strlen(msg_buf));
+
+#endif
 	}
 }
 
@@ -217,7 +308,6 @@ void thermalImgFSM(){
 
 		  //Command DMA transfer from amg8833
 		status=amg8833ReadDMA(&cam,img_buf);
-		_FL_DEBUG(status,GPIOD,GPIO_PIN_12);
 		if(status==HAL_OK)
 			  //Clear ctrl bit
 			  AMG_RD_START=0;
@@ -228,8 +318,6 @@ void thermalImgFSM(){
 
 		 //Command DMA transfer to uart2
 		 status=HAL_UART_Transmit_DMA(&huart3,img_buf,AMG8833_DS);
-		 //_FL_DEBUG(status,GPIOD,GPIO_PIN_13);
-		 //_FL_EQ_DEBUG(status,HAL_BUSY,GPIOD,GPIO_PIN_15);
 		 if(status==HAL_OK){
 			 AMG_RD_CPLT=0;
 		 }
@@ -241,23 +329,58 @@ void thermalImgFSM(){
 	  }
 }
 
-/*Read joystick position and perform one motor step according to joystick direction*/
+void logMotor(){
+
+	sprintf(msg_buf,"Motor position: %f %f %d \r\n\r\n\r\n",
+								motor.ang_idx*motor.res,motor.res,motor.ang_idx);
+	HAL_UART_Transmit_DMA(&huart6,(uint8_t*)msg_buf,strlen(msg_buf));
+}
+
+/*Read joystick's position and EXTI buttons and perform one motor step according to joystick direction*/
 void motorControl(){
+
+	JstickDir dir;
 
 	if(MOTOR_MV){
 		MOTOR_MV=0;
-		switch(jstickGetDirection(&js)){
-		case LEFT:
-			waveStep(&motor,1);
-			break;
-		case RIGHT:
-			waveStep(&motor,0);
-			break;
+
+		dir=jstickGetDirPoll(&js);
+		if(dir==LEFT || LEFT_BUT_PUSH){
+			LEFT_BUT_PUSH=0;
+			step(&motor,0);
+
+			logMotor();
+
 		}
-		//sprintf(msg_buf,"%d\r\n",motor.cur_step);
-		//HAL_UART_Transmit(&huart3,(uint8_t*)msg_buf,strlen(msg_buf),HAL_MAX_DELAY);
+		else if(dir==RIGHT || RIGHT_BUT_PUSH){
+			RIGHT_BUT_PUSH=0;
+			step(&motor,1);
+
+			logMotor();
+		}
 	}
 
+}
+
+/*Functions to init calibration/sound source localization mode*/
+void initCalibration(){
+	  /*Start DMA request to playback audio through DAC channels 1 and 2*/
+	  HAL_DAC_Start_DMA(&hdac,DAC_CHANNEL_1,(uint32_t*)audio_out_buf1,AUDIO_TOT_BUF_SZ,DAC_ALIGN_12B_R);
+	  HAL_DAC_Start_DMA(&hdac,DAC_CHANNEL_2,(uint32_t*)audio_out_buf2,AUDIO_TOT_BUF_SZ,DAC_ALIGN_12B_R);
+
+	  GPIOD->ODR&=~GPIO_PIN_15;
+}
+
+void initSSL(){
+	  /*Stop playback loop*/
+	  HAL_DAC_Stop_DMA(&hdac,DAC_CHANNEL_1);
+	  HAL_DAC_Stop_DMA(&hdac,DAC_CHANNEL_2);
+
+	  /*Reset motor angle idx to set initial camera offset*/
+	  rstAngle(&motor);
+	  logMotor();
+	  mode=1;
+	  GPIOD->ODR|=GPIO_PIN_15;
 }
 /* USER CODE END 0 */
 
@@ -297,10 +420,14 @@ int main(void)
   MX_ADC2_Init();
   MX_USART3_UART_Init();
   MX_TIM7_Init();
+  MX_USART6_UART_Init();
+  MX_TIM10_Init();
   /* USER CODE BEGIN 2 */
 
-  //_FL_DEBUG(status,GPIOD,GPIO_PIN_12);
 
+#ifdef DAC_DEBUG
+  testDAC();
+#endif
 
   /*
    * Init DMA handle data structures for thermal image in/out transfer
@@ -317,6 +444,7 @@ int main(void)
   }
 
   GPIOD->ODR&=~GPIO_PIN_14;
+
   /*Start Timer 6 - Update event every 1/20 s for thermal camera reading*/
   HAL_TIM_Base_Start_IT(&htim6);
   /*Start Timer 7 - Update event every 1/10 s for motor control*/
@@ -333,14 +461,11 @@ int main(void)
   HAL_ADC_Start_DMA(&hadc1,(uint32_t*)audio_in_buf1,AUDIO_TOT_BUF_SZ);
   HAL_ADC_Start_DMA(&hadc2,(uint32_t*)audio_in_buf2,AUDIO_TOT_BUF_SZ);
 
-  HAL_DAC_Start_DMA(&hdac,DAC_CHANNEL_1,(uint32_t*)audio_out_buf1,AUDIO_TOT_BUF_SZ,DAC_ALIGN_12B_R);
-  HAL_DAC_Start_DMA(&hdac,DAC_CHANNEL_2,(uint32_t*)audio_out_buf2,AUDIO_TOT_BUF_SZ,DAC_ALIGN_12B_R);
-
   /*Init step motor data structure*/
-  initStep(&motor,GPIO_PIN_1,GPIO_PIN_2,GPIO_PIN_3,GPIO_PIN_4,GPIOD);
+  initStep(&motor,GPIO_PIN_1,GPIO_PIN_2,GPIO_PIN_3,GPIO_PIN_4,GPIOD,FULL);
 
   /*Init joystick img_buf structure with yellow error pin*/
-  jstickInit(&js,&hadc3,GPIO_PIN_12,GPIOD);
+  initJstick(&js,&hadc3,GPIO_PIN_12,GPIOD);
   /*Start ADC3 associated with joystick*/
   HAL_ADC_Start(&hadc3);
 
@@ -348,12 +473,50 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  MODE_TOGGLE=0;
+  mode=1;
+
   while (1)
   {
-
-	  audioPlayback();
 	  thermalImgFSM();
-	  motorControl();
+
+	  /*MODE_TOGGLE bit is set by the EXTI4 button line debounce timer TIM10*/
+	  if( !MODE_TOGGLE ){
+		  /*
+		   * Calibration mode:
+		   * -microphones AD conversion can be tested connecting an oscilloscope or an amplifier to DAC channels 1/2
+		   * -camera can be moved manually using joystick and buttons to set angular offset
+		   */
+		  if(mode){
+			  initCalibration();
+			  mode=0;
+		  }
+
+		  audioPlayback();
+		  motorControl();
+	  }
+	  else{
+		  if(!mode){
+			  /*
+			   * Sound Source Localization mode:
+			   * motor movement tests
+			   */
+			  initSSL();
+			  mode=1;
+		  }
+
+		  if(LEFT_BUT_PUSH){
+
+			  LEFT_BUT_PUSH=0;
+			  moveToPoll(&motor,90.0);
+		  }
+		  else if(RIGHT_BUT_PUSH){
+
+			  RIGHT_BUT_PUSH=0;
+			  moveToPoll(&motor,-90.0);
+		  }
+	  }
+
 
     /* USER CODE END WHILE */
 
@@ -447,7 +610,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_6;
+  sConfig.Channel = ADC_CHANNEL_8;
   sConfig.Rank = 1;
   sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
@@ -767,6 +930,37 @@ static void MX_TIM7_Init(void)
 }
 
 /**
+  * @brief TIM10 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM10_Init(void)
+{
+
+  /* USER CODE BEGIN TIM10_Init 0 */
+
+  /* USER CODE END TIM10_Init 0 */
+
+  /* USER CODE BEGIN TIM10_Init 1 */
+
+  /* USER CODE END TIM10_Init 1 */
+  htim10.Instance = TIM10;
+  htim10.Init.Prescaler = 99;
+  htim10.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim10.Init.Period = 2499;
+  htim10.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim10.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim10) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM10_Init 2 */
+
+  /* USER CODE END TIM10_Init 2 */
+
+}
+
+/**
   * @brief USART3 Initialization Function
   * @param None
   * @retval None
@@ -800,6 +994,39 @@ static void MX_USART3_UART_Init(void)
 }
 
 /**
+  * @brief USART6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART6_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART6_Init 0 */
+
+  /* USER CODE END USART6_Init 0 */
+
+  /* USER CODE BEGIN USART6_Init 1 */
+
+  /* USER CODE END USART6_Init 1 */
+  huart6.Instance = USART6;
+  huart6.Init.BaudRate = 115200;
+  huart6.Init.WordLength = UART_WORDLENGTH_8B;
+  huart6.Init.StopBits = UART_STOPBITS_1;
+  huart6.Init.Parity = UART_PARITY_NONE;
+  huart6.Init.Mode = UART_MODE_TX_RX;
+  huart6.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart6.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART6_Init 2 */
+
+  /* USER CODE END USART6_Init 2 */
+
+}
+
+/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -828,6 +1055,9 @@ static void MX_DMA_Init(void)
   /* DMA2_Stream2_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream2_IRQn);
+  /* DMA2_Stream6_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream6_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream6_IRQn);
 
 }
 
@@ -841,19 +1071,21 @@ static void MX_GPIO_Init(void)
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15
                           |GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : PA0 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  /*Configure GPIO pins : PE2 PE3 PE4 */
+  GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PD12 PD13 PD14 PD15
                            PD1 PD2 PD3 PD4 */
@@ -865,21 +1097,18 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+  HAL_NVIC_SetPriority(EXTI2_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI2_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI3_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI4_IRQn);
 
 }
 
 /* USER CODE BEGIN 4 */
-
-/*
- * Callback function to manage the blue button pushed event
- */
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_PIN){
-	if(GPIO_PIN==GPIO_PIN_0){
-		GPIOD->ODR^=GPIO_PIN_13;
-	}
-}
 
 /* USER CODE END 4 */
 
@@ -895,18 +1124,34 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   /* USER CODE BEGIN Callback 0 */
 
-	if(htim->Instance == TIM7){
-		MOTOR_MV=1;
-	}
-	if(htim->Instance == TIM6){
-		AMG_RD_START=1;
-	 }
-
   /* USER CODE END Callback 0 */
   if (htim->Instance == TIM1) {
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
+	else if( htim->Instance == TIM7 ){
+		MOTOR_MV=1;
+	}
+
+	else if( htim->Instance == TIM6 ){
+		AMG_RD_START=1;
+	 }
+
+  	/*External interrupt push buttons debounce timer*/
+	else if( htim->Instance == TIM10 ){
+
+		if( GPIOE->IDR & GPIO_PIN_2 && EXTI_BUT_PUSH  )
+			RIGHT_BUT_PUSH=1;
+
+		else if( GPIOE->IDR & GPIO_PIN_3  && EXTI_BUT_PUSH )
+			LEFT_BUT_PUSH=1;
+
+		else if( GPIOE->IDR & GPIO_PIN_4 && EXTI_BUT_PUSH )
+			MODE_TOGGLE^=1;
+
+		EXTI_BUT_PUSH=0;
+	}
+
   /* USER CODE END Callback 1 */
 }
 
