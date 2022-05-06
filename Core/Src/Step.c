@@ -8,7 +8,10 @@
 #include "utils.h"
 #include "stm32f4xx.h"
 
-void initStep(Step *inst,uint16_t p0,uint16_t p1,uint16_t p2,uint16_t p3,GPIO_TypeDef *port,StepMode mode){
+/*Init stepper motor data structure*/
+void initStep(Step *inst,uint16_t p0,uint16_t p1,uint16_t p2,uint16_t p3,GPIO_TypeDef *port,StepMode mode,TIM_HandleTypeDef *htim){
+
+	/*Assign gpio pins and port*/
 	inst->pins[0]=p0;
 	inst->pins[1]=p1;
 	inst->pins[2]=p2;
@@ -18,7 +21,11 @@ void initStep(Step *inst,uint16_t p0,uint16_t p1,uint16_t p2,uint16_t p3,GPIO_Ty
 
 	initMode(inst,mode);
 	rstAngle(inst);
+
+	inst->move_lock=0;
+	inst->htim=htim;
 }
+
 
 void initMode(Step *inst,StepMode mode){
 	inst->mode=mode;
@@ -123,20 +130,66 @@ void step(Step *inst,uint8_t dir){
 	}
 }
 
+
 /*Move motor from a starting position to a destination expressed in angle (degree)*/
 void moveToPoll(Step *inst,float angle){
 
-	if( angle > inst->ang_idx * inst->res ){
-		while( angle > ( inst->ang_idx + 1 ) * inst->res ){
+	if(!inst->move_lock){
+		inst->move_lock=1;
+
+		if( angle > inst->ang_idx * inst->res ){
+			while( angle > ( inst->ang_idx + 1 ) * inst->res ){
+				step(inst,1);
+				HAL_Delay(1);
+			}
+		}
+		else{
+			while( angle < ( inst->ang_idx - 1 ) * inst->res ){
+				step(inst,0);
+				HAL_Delay(1);
+			}
+		}
+
+		inst->move_lock=0;
+	}
+}
+
+/*
+ * Perform one step in interrupt mode
+ * this function is meant to be called inside instance timer PeriodElapsed callback
+ */
+void stepIt(Step *inst){
+	if( inst->destination_it > inst->ang_idx * inst->res ){
+
+		if( inst->destination_it > ( inst->ang_idx + 1 ) * inst->res )
 			step(inst,1);
-			HAL_Delay(1);
+		else{
+			HAL_TIM_Base_Stop_IT(inst->htim);
+			inst->move_lock=0;
 		}
 	}
+
 	else{
-		while( angle < ( inst->ang_idx - 1 ) * inst->res ){
+		if( inst->destination_it < ( inst->ang_idx - 1 ) * inst->res )
 			step(inst,0);
-			HAL_Delay(1);
+		else{
+			HAL_TIM_Base_Stop_IT(inst->htim);
+			inst->move_lock=0;
 		}
 	}
 }
+
+
+/*Move motor from a starting position to a destination expressed in angle (degree)*/
+void moveToIt(Step *inst,float angle){
+
+	if(!inst->move_lock){
+		inst->move_lock=1;
+
+		inst->destination_it=angle;
+		HAL_TIM_Base_Start_IT( inst->htim );
+	}
+}
+
+
 

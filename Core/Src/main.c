@@ -101,6 +101,7 @@ I2C_HandleTypeDef hi2c1;
 DMA_HandleTypeDef hdma_i2c1_rx;
 
 TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim4;
 TIM_HandleTypeDef htim6;
 TIM_HandleTypeDef htim7;
 TIM_HandleTypeDef htim10;
@@ -180,6 +181,7 @@ static void MX_USART3_UART_Init(void);
 static void MX_TIM7_Init(void);
 static void MX_USART6_UART_Init(void);
 static void MX_TIM10_Init(void);
+static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -261,12 +263,6 @@ void HAL_DACEx_ConvCpltCallbackCh2(DAC_HandleTypeDef *hdac){
 
 void audioPlayback(){
 
-/*If debug logging is on, compute mean value of buffers and transmit on UART6*/
-#ifdef DEBUG_LOG
-	uint32_t mean_ch1=0;
-	uint32_t mean_ch2=0;
-#endif
-
 	/*If channel 1 and 2 conversion was completed*/
 	if(BUF1_CPLT && BUF2_CPLT){
 		BUF1_CPLT=0;
@@ -277,19 +273,7 @@ void audioPlayback(){
 			audio_out_ptr1[i]=audio_in_ptr1[i];
 			audio_out_ptr2[i]=audio_in_ptr2[i];
 
-#ifdef DEBUG_LOG
-			mean_ch1+=audio_out_ptr1[i];
-			mean_ch2+=audio_out_ptr2[i];
-#endif
 		}
-#ifdef DEBUG_LOG
-		mean_ch1/=AUDIO_BUF_SZ;
-		mean_ch2/=AUDIO_BUF_SZ;
-
-		sprintf(msg_buf,"Channel 1 mean: %hu\r\nChannel 2 mean:%hu\r\n\r\n\r\n",mean_ch1,mean_ch2);
-		HAL_UART_Transmit_DMA(&huart6,(uint8_t*)msg_buf,strlen(msg_buf));
-
-#endif
 	}
 }
 
@@ -422,6 +406,7 @@ int main(void)
   MX_TIM7_Init();
   MX_USART6_UART_Init();
   MX_TIM10_Init();
+  MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
 
 
@@ -462,7 +447,7 @@ int main(void)
   HAL_ADC_Start_DMA(&hadc2,(uint32_t*)audio_in_buf2,AUDIO_TOT_BUF_SZ);
 
   /*Init step motor data structure*/
-  initStep(&motor,GPIO_PIN_1,GPIO_PIN_2,GPIO_PIN_3,GPIO_PIN_4,GPIOD,FULL);
+  initStep(&motor,GPIO_PIN_1,GPIO_PIN_2,GPIO_PIN_3,GPIO_PIN_4,GPIOD,FULL,&htim4);
 
   /*Init joystick img_buf structure with yellow error pin*/
   initJstick(&js,&hadc3,GPIO_PIN_12,GPIOD);
@@ -508,12 +493,12 @@ int main(void)
 		  if(LEFT_BUT_PUSH){
 
 			  LEFT_BUT_PUSH=0;
-			  moveToPoll(&motor,90.0);
+			  moveToIt(&motor,90.0);
 		  }
 		  else if(RIGHT_BUT_PUSH){
 
 			  RIGHT_BUT_PUSH=0;
-			  moveToPoll(&motor,-90.0);
+			  moveToIt(&motor,-90.0);
 		  }
 	  }
 
@@ -854,6 +839,51 @@ static void MX_TIM2_Init(void)
 }
 
 /**
+  * @brief TIM4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM4_Init(void)
+{
+
+  /* USER CODE BEGIN TIM4_Init 0 */
+
+  /* USER CODE END TIM4_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM4_Init 1 */
+
+  /* USER CODE END TIM4_Init 1 */
+  htim4.Instance = TIM4;
+  htim4.Init.Prescaler = 99;
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim4.Init.Period = 499;
+  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM4_Init 2 */
+
+  /* USER CODE END TIM4_Init 2 */
+
+}
+
+/**
   * @brief TIM6 Initialization Function
   * @param None
   * @retval None
@@ -1129,28 +1159,31 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
-	else if( htim->Instance == TIM7 ){
-		MOTOR_MV=1;
-	}
+  else if( htim->Instance == TIM4 ){
+	  stepIt(&motor);
+  }
+  else if( htim->Instance == TIM6 ){
+	  AMG_RD_START=1;
+  }
+  else if( htim->Instance == TIM7 ){
+	MOTOR_MV=1;
+  }
 
-	else if( htim->Instance == TIM6 ){
-		AMG_RD_START=1;
-	 }
+  /*External interrupt push buttons debounce timer*/
+  else if( htim->Instance == TIM10 ){
 
-  	/*External interrupt push buttons debounce timer*/
-	else if( htim->Instance == TIM10 ){
+	  if( GPIOE->IDR & GPIO_PIN_2 && EXTI_BUT_PUSH  )
+		  RIGHT_BUT_PUSH=1;
 
-		if( GPIOE->IDR & GPIO_PIN_2 && EXTI_BUT_PUSH  )
-			RIGHT_BUT_PUSH=1;
+	  else if( GPIOE->IDR & GPIO_PIN_3  && EXTI_BUT_PUSH )
+		  LEFT_BUT_PUSH=1;
 
-		else if( GPIOE->IDR & GPIO_PIN_3  && EXTI_BUT_PUSH )
-			LEFT_BUT_PUSH=1;
+	  else if( GPIOE->IDR & GPIO_PIN_4 && EXTI_BUT_PUSH )
+		  MODE_TOGGLE^=1;
 
-		else if( GPIOE->IDR & GPIO_PIN_4 && EXTI_BUT_PUSH )
-			MODE_TOGGLE^=1;
+	  EXTI_BUT_PUSH=0;
 
-		EXTI_BUT_PUSH=0;
-	}
+  }
 
   /* USER CODE END Callback 1 */
 }
