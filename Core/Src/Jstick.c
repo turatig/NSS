@@ -27,8 +27,8 @@ JstickDir jstickGetDirPoll(Jstick *inst){
 	if(status==HAL_OK){
 		raw_val=HAL_ADC_GetValue(inst->hadc);
 
-		if(raw_val>4000) return LEFT;
-		if(raw_val<100) return RIGHT;
+		if(raw_val>4000) return RIGHT;
+		if(raw_val<100) return LEFT;
 	}
 
 	return CENTER;

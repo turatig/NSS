@@ -20,19 +20,19 @@ void initStep(Step *inst,uint16_t p0,uint16_t p1,uint16_t p2,uint16_t p3,GPIO_Ty
 	inst->port=port;
 
 	initMode(inst,mode);
-	rstAngle(inst);
 
+	inst->ang_idx=0;
 	inst->move_lock=0;
 	inst->htim=htim;
+	inst->ang_lim=0;
 }
 
-
+/*Init step mode, step resolution, step sequence indexes and reset pins*/
 void initMode(Step *inst,StepMode mode){
 	inst->mode=mode;
 	inst->cur_step=0;
 	rstPins(inst);
 
-	/*BYJ-24 shaft (considering also torque factor) performs a complete rotation in 2038 steps*/
 	if(mode==WAVE || mode==FULL)
 		inst->res=360.0/2038.0;
 }
@@ -44,9 +44,14 @@ void rstAngle(Step *inst){
 	inst->ang_idx=0;
 }
 
+void setLim(Step *inst,float angle){
+	inst->ang_lim=angle;
+}
+
 
 /*
-	WAVE DRIVE PATTERN
+ *  Commands to perform the next step in the sequence
+	WAVE-STEP PIN ACTIVATION PATTERN
 	 p1 p2 p3 p4
     |1  0  0  0|
     |0  1  0  0|
@@ -73,7 +78,7 @@ void waveStep(Step *inst,uint8_t dir){
 }
 
 /*
-	FULL DRIVE PATTERN
+	FULL-STEP PATTERN
 	 p1 p2 p3 p4
     |1  1  0  0|
     |0  1  1  0|
@@ -104,23 +109,8 @@ void fullStep(Step *inst,uint8_t dir){
 }
 
 /*
-	HALF DRIVE PATTERN
-	 p1 p2 p3 p4
-    |1  0  0  0|
-    |1  1  0  0|
-    |0  1  0  0|
-    |0  1  1  0|
-    |0  0  1  0|
-    |0  0  1  1|
-    |0  0  0  1|
-    |1  0  0  1|
-
+ * Step commands exported to client
  */
-void halfStep(Step *inst,uint8_t dir){
-	__NOP();
-}
-
-/*Perform one step according to drive mode*/
 void step(Step *inst,uint8_t dir){
 	switch(inst->mode){
 	case WAVE:
@@ -130,7 +120,6 @@ void step(Step *inst,uint8_t dir){
 	}
 }
 
-
 /*Move motor from a starting position to a destination expressed in angle (degree)*/
 void moveToPoll(Step *inst,float angle){
 
@@ -138,6 +127,8 @@ void moveToPoll(Step *inst,float angle){
 		inst->move_lock=1;
 
 		if( angle > inst->ang_idx * inst->res ){
+
+			/*Till destination angle or limit is reached*/
 			while( angle > ( inst->ang_idx + 1 ) * inst->res ){
 				step(inst,1);
 				HAL_Delay(1);

@@ -28,6 +28,7 @@
 #include "utils.h"
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -55,7 +56,7 @@
 #define AUDIO_CTRL_OSET 0x2
 #define BUF1_CPLT (*(volatile uint32_t*)BIT_BAND_ADDR(AUDIO_CTRL_OSET,0x7))
 #define BUF2_CPLT (*(volatile uint32_t*)BIT_BAND_ADDR(AUDIO_CTRL_OSET,0x6))
-#define OVR_THRS (*(volatile uint32_t*)BIT_BAND_ADDR(AUDIO_CTRL_OSET,0x5))
+//#define OVR_THRS (*(volatile uint32_t*)BIT_BAND_ADDR(AUDIO_CTRL_OSET,0x5))
 
 /*Push buttons control byte offset in bit band region*/
 #define EXTI_BUT_CTRL_OSET 0x3
@@ -68,9 +69,19 @@
 
 /*Audio buffer size*/
 /*Half of the audio buffer is filled by the main playback and process loop*/
-#define AUDIO_BUF_SZ 256
+#define AUDIO_BUF_SZ 512
 /*Used by the DMA as unit of transfer*/
 #define AUDIO_TOT_BUF_SZ (AUDIO_BUF_SZ * 2)
+/*
+ * Cross-correlation buffer multiplying factor.
+ * Tells how many times cross-correlation buffer is bigger than input audio buffer.
+ */
+#define XCOR_BUF_MULT 3
+#define XCOR_BUF_SZ (AUDIO_BUF_SZ*XCOR_BUF_MULT)
+/*Cross-correlation result array size*/
+#define XCOR_SZ AUDIO_BUF_SZ*3
+/*Number of last mean values are considered to compute a stable estimate of DC offset*/
+#define DC_BUF_SZ 100
 
 /*
  * Debug macros
@@ -78,6 +89,24 @@
  */
 //#define DAC_DEBUG 1
 //#define DEBUG_LOG 1
+/*
+ * Time benchmark macros
+ */
+//#define TIME_PREPROC 1
+//#define TIME_CONV_CH1 1
+//#define TIME_CONV_CH2 1
+#define TIME_XCOR 1
+//#define TIME_AUDIO_PROC 1
+/*
+* Set oscilloscope timer trigger
+*/
+#define CHRONO_START() GPIOE->ODR|=GPIO_PIN_11
+/*
+* Reset oscilloscope timer trigger
+*/
+#define CHRONO_STOP() GPIOE->ODR&=~GPIO_PIN_11
+
+
 
 /* USER CODE END PD */
 
@@ -120,7 +149,7 @@ Jstick js;
 
 /*Thermal image buffer*/
 uint8_t img_buf[AMG8833_DS];
-char msg_buf[25];
+char msg_buf[128];
 HAL_StatusTypeDef status;
 
 /*
@@ -132,25 +161,6 @@ uint16_t audio_out_buf1[AUDIO_TOT_BUF_SZ];
 uint16_t audio_in_buf2[AUDIO_TOT_BUF_SZ];
 uint16_t audio_out_buf2[AUDIO_TOT_BUF_SZ];
 
-#ifdef DAC_DEBUG
-	uint16_t square_wv[AUDIO_TOT_BUF_SZ];
-
-	//Test DAC channels reproducing a square wave
-	void testDAC(){
-		for(int i=0; i<AUDIO_TOT_BUF_SZ; i++){
-			if(i>AUDIO_BUF_SZ)
-				square_wv[i]=0;
-			else
-				square_wv[i]=2048;
-		}
-		HAL_TIM_Base_Start_IT(&htim2);
-		HAL_DAC_Start_DMA(&hdac,DAC_CHANNEL_1,(uint32_t*)square_wv,AUDIO_TOT_BUF_SZ,DAC_ALIGN_12B_R);
-		HAL_DAC_Start_DMA(&hdac,DAC_CHANNEL_2,(uint32_t*)square_wv,AUDIO_TOT_BUF_SZ,DAC_ALIGN_12B_R);
-		while(1){
-			__NOP();
-		}
-	}
-#endif
 
 /*
  * Audio buffer pointers switched by the ISR relative to DMA transfer
@@ -161,6 +171,44 @@ volatile uint16_t *audio_out_ptr1;
 volatile uint16_t *audio_in_ptr2;
 volatile uint16_t *audio_out_ptr2;
 
+/*
+ * Cross-correlation buffers.
+ * These buffers will contain audio samples without DC offset
+ */
+int xcor_buf1[XCOR_BUF_SZ];
+int xcor_buf2[XCOR_BUF_SZ];
+int xcor_res[XCOR_BUF_SZ*2-1];
+
+/*
+ * Cross-correlation buffer offset.
+ * This counter is incremented xcor_buf_oset=( xcor_buf_idx+1 ) % XCOR_BUF_MULT.
+ * Remind that XCOR_BUF_SZ = AUDIO_BUF_SZ * XCOR_BUF_MULT
+ */
+uint8_t xcor_buf_oset;
+
+/*
+ * DC offset buffer to compute a stable estimate of DC offset of the two channels.
+ * DC offset must be removed in order to have a zero mean signal useful to compute cross-correlation.
+ * This buffer will store the last DC_OSET_BUF_SZ mean values computed on input buffers channel1-2
+ */
+uint16_t dc_buf_ch1[DC_BUF_SZ];
+uint16_t dc_buf_ch2[DC_BUF_SZ];
+uint16_t dc_buf_idx;
+
+/*
+ * Every time RMS of both input buffers happen to be above the threshold this counter is incremented(max 3).
+ * Else will be reset to 0
+ */
+uint8_t ovr_thr_cnt;
+/*
+ * This flag is set by the preprocessing loop in SSL mode if RMS of signal in ch1-2 is above the threshold
+ * Trigger sound localization event
+ */
+uint8_t ovr_thr;
+
+/*
+ * RMS above this threshold to trigger SSL event
+ */
 uint16_t threshold;
 /*Mode bit set by the main loop*/
 uint8_t mode;
@@ -188,6 +236,27 @@ static void MX_TIM4_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+#ifdef DAC_DEBUG
+	uint16_t square_wv[AUDIO_TOT_BUF_SZ];
+
+	//Test DAC channels reproducing a square wave
+	void testDAC(){
+		for(int i=0; i<AUDIO_TOT_BUF_SZ; i++){
+			if(i>AUDIO_BUF_SZ)
+				square_wv[i]=0;
+			else
+				square_wv[i]=2048;
+		}
+		HAL_TIM_Base_Start_IT(&htim2);
+		HAL_DAC_Start_DMA(&hdac,DAC_CHANNEL_1,(uint32_t*)square_wv,AUDIO_TOT_BUF_SZ,DAC_ALIGN_12B_R);
+		HAL_DAC_Start_DMA(&hdac,DAC_CHANNEL_2,(uint32_t*)square_wv,AUDIO_TOT_BUF_SZ,DAC_ALIGN_12B_R);
+		while(1){
+			__NOP();
+		}
+	}
+#endif
+
 
 /*
  * Callback function to manage external interrupt push buttons pushed
@@ -219,69 +288,10 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart){
 	}
 }
 
-/*
- * Handler for audio input DMA memory transfer half-cplt interrupt
- * AUDIO_BUF_SZ sample were converted and put into audio_in_buf.
- * Main playback loop transfer from lower audio_in_buf to higher audio_out_buf
- */
-
-void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc){
-	if(hadc->Instance==ADC1){
-		audio_in_ptr1=&audio_in_buf1[0];
-		audio_out_ptr1=&audio_out_buf1[AUDIO_BUF_SZ];
-		BUF1_CPLT=1;
-	}
-
-	if(hadc->Instance==ADC2){
-		audio_in_ptr2=&audio_in_buf2[0];
-		audio_out_ptr2=&audio_out_buf2[AUDIO_BUF_SZ];
-		BUF2_CPLT=1;
-	}
-}
-
-/*
- * Handler for audio input DMA memory transfer half-cplt interrupt
- * AUDIO_TOT_BUF_SZ sample were taken from audio out buf and fed into DAC.
- * Main playback loop transfer from higher audio_in_buf to lower audio_out_buf
- */
-void HAL_DAC_ConvCpltCallbackCh1(DAC_HandleTypeDef *hdac){
-	audio_in_ptr1=&audio_in_buf1[AUDIO_BUF_SZ];
-	audio_out_ptr1=&audio_out_buf1[0];
-	BUF1_CPLT=1;
-}
-
-void HAL_DACEx_ConvCpltCallbackCh2(DAC_HandleTypeDef *hdac){
-	audio_in_ptr2=&audio_in_buf2[AUDIO_BUF_SZ];
-	audio_out_ptr2=&audio_out_buf2[0];
-	BUF2_CPLT=1;
-}
-
-/*
- * Audio playback process.
- * Transfer audio sample from input buffer to output buffer using pointers set by ISR
- */
-
-void audioPlayback(){
-
-	/*If channel 1 and 2 conversion was completed*/
-	if(BUF1_CPLT && BUF2_CPLT){
-		BUF1_CPLT=0;
-		BUF2_CPLT=0;
-
-		/*Transfer samples from input to output buffers*/
-		for(int i=0;i<AUDIO_BUF_SZ;i++){
-			audio_out_ptr1[i]=audio_in_ptr1[i];
-			audio_out_ptr2[i]=audio_in_ptr2[i];
-
-		}
-	}
-}
-
-/*Check bits set by:
+/*Manage thermal image I/O from AMG sensor to UART interface by checking bits set by:
  * Timer 6 ISR
  * DMA1 Stream 0 (Thermal image I2C Rx) Rx Cplt ISR
  * DMA1 Stream 6 (Thermal image USART2 Tx) Tx Cplt ISR
- * and subsequently manage Timer 6 reset and DMA transfer sequence
  */
 void thermalImgFSM(){
 	  /*
@@ -313,6 +323,256 @@ void thermalImgFSM(){
 	  }
 }
 
+
+
+/*
+ * Handler for audio input DMA memory transfer half-cplt interrupt
+ * AUDIO_BUF_SZ sample were converted and put into audio_in_buf.
+ * Data can be moved by main application from lower audio_in_buf to higher audio_out_buf
+ */
+
+void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc){
+	if(hadc->Instance==ADC1){
+
+#ifdef TIME_CONV_CH1
+		CHRONO_START();
+#endif
+		audio_in_ptr1=&audio_in_buf1[0];
+		audio_out_ptr1=&audio_out_buf1[AUDIO_BUF_SZ];
+		BUF1_CPLT=1;
+	}
+
+	if(hadc->Instance==ADC2){
+
+#ifdef TIME_CONV_CH2
+		CHRONO_START();
+#endif
+		audio_in_ptr2=&audio_in_buf2[0];
+		audio_out_ptr2=&audio_out_buf2[AUDIO_BUF_SZ];
+		BUF2_CPLT=1;
+	}
+}
+
+/*
+ * Handler for audio input DMA memory transfer half-cplt interrupt
+ * AUDIO_TOT_BUF_SZ sample were taken from audio out buf and fed into DAC.
+ * Data can be moved by main application from higher audio_in_buf to lower audio_out_buf
+ */
+void HAL_DAC_ConvCpltCallbackCh1(DAC_HandleTypeDef *hdac){
+
+#ifdef TIME_CONV_CH1
+	CHRONO_STOP();
+#endif
+	audio_in_ptr1=&audio_in_buf1[AUDIO_BUF_SZ];
+	audio_out_ptr1=&audio_out_buf1[0];
+	BUF1_CPLT=1;
+}
+
+void HAL_DACEx_ConvCpltCallbackCh2(DAC_HandleTypeDef *hdac){
+
+#ifdef TIME_CONV_CH2
+	CHRONO_STOP();
+#endif
+	audio_in_ptr2=&audio_in_buf2[AUDIO_BUF_SZ];
+	audio_out_ptr2=&audio_out_buf2[0];
+	BUF2_CPLT=1;
+}
+
+/*
+ * Handler for audio input DMA memory transfer half-cplt interrupt
+ * AUDIO_TOT_BUF_SZ sample were taken from audio out buf and fed into DAC.
+ * Data can be moved by main application from higher audio_in_buf to lower audio_out_buf (SSL mode only)
+ */
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc){
+	if(mode){
+		if(hadc->Instance==ADC1){
+
+#ifdef TIME_CONV_CH1
+			CHRONO_STOP();
+#endif
+			audio_in_ptr1=&audio_in_buf1[AUDIO_BUF_SZ];
+			//audio_out_ptr1=&audio_out_buf1[0];
+			BUF1_CPLT=1;
+		}
+
+		if(hadc->Instance==ADC2){
+
+#ifdef TIME_CONV_CH2
+			CHRONO_STOP();
+#endif
+			audio_in_ptr2=&audio_in_buf2[AUDIO_BUF_SZ];
+			//audio_out_ptr2=&audio_out_buf2[0];
+			BUF2_CPLT=1;
+		}
+
+	}
+}
+
+/*
+ * Audio playback process.
+ * Transfer audio samples from input buffer to output buffer using pointers set by ISR (ping-pong buffers).
+ * Used by main application during calibration mode
+ */
+
+void audioPlayback(){
+
+	/*If channel 1 and 2 conversion was completed*/
+	//if(BUF1_CPLT && BUF2_CPLT){
+		BUF1_CPLT=0;
+		BUF2_CPLT=0;
+
+		/*Transfer samples from input to output buffers*/
+		for(int i=0;i<AUDIO_BUF_SZ;i++){
+			audio_out_ptr1[i]=audio_in_ptr1[i];
+			audio_out_ptr2[i]=audio_in_ptr2[i];
+
+		}
+	//}
+}
+
+/*
+ * Audio preprocessing.
+ * Transfer audio samples from input buffer to output buffer using pointers set by ISR (ping-pong buffers).
+ * DC offset is removed from every sample and threshold overflow is computed.
+ * Used by main application during SSL mode
+ */
+void audioPreproc(){
+	uint32_t mean1,mean2;
+	uint32_t dc1,dc2;
+	float rms1,rms2;
+
+	/*
+	 * Preproc loop will set rms values of last buf1 and buf2 to trigger cross-correlation
+	 */
+
+	/*If channel 1 and 2 conversion was completed*/
+	if(BUF1_CPLT && BUF2_CPLT){
+
+#ifdef 	TIME_PREPROC
+		CHRONO_START();
+#endif
+		BUF1_CPLT=0;
+		BUF2_CPLT=0;
+
+		mean1=0;
+		mean2=0;
+
+		dc1=0;
+		dc2=0;
+
+		rms1=0;
+		rms2=0;
+		
+
+		/*
+		 * Transfer samples from input to cross-correlation buffers
+		 */
+		for( int i=0 ; i<AUDIO_BUF_SZ || i<DC_BUF_SZ ; i++ ){
+
+			/*
+			 * Compute the mean value of input buffers 1 and 2
+			 */
+			if(i<AUDIO_BUF_SZ){
+				mean1+=audio_in_ptr1[i];
+				mean2+=audio_in_ptr2[i];
+			}
+			/*
+			 * Compute estimate of DC offset based on the last DC_BUF_SZ mean values computed in buffers
+			 */
+			if(i<DC_BUF_SZ){
+				dc1+=dc_buf_ch1[dc_buf_idx];
+				dc2+=dc_buf_ch2[dc_buf_idx];
+			}
+
+		}
+
+		/*
+		 * Enqueue current mean value of input buffer in dc buffer
+		 */
+		dc_buf_ch1[dc_buf_idx]=(uint16_t)( mean1/AUDIO_BUF_SZ );
+		dc_buf_ch2[dc_buf_idx]=(uint16_t)( mean2/AUDIO_BUF_SZ );
+
+		dc1/=DC_BUF_SZ;
+		dc2/=DC_BUF_SZ;
+
+		/*
+		 * Subtract DC offset to have 0 mean signal in cross-correlation buffer.
+		 * Compute RMS of signals in ch1-2 input buffers
+		 */
+
+		for(int i=0,idx;i<AUDIO_BUF_SZ;i++){
+
+			idx=xcor_buf_oset * AUDIO_BUF_SZ + i;
+			xcor_buf1[idx]=audio_in_ptr1[i] - dc1;
+			xcor_buf2[idx]=audio_in_ptr2[i] - dc2;
+
+			rms1+=( xcor_buf1[idx] * xcor_buf1[idx] ) / AUDIO_BUF_SZ;
+			rms2+=( xcor_buf2[idx] * xcor_buf2[idx] ) / AUDIO_BUF_SZ;
+		}
+
+		rms1=sqrt(rms1);
+		rms2=sqrt(rms2);
+
+#ifdef TIME_PREPROC
+		CHRONO_STOP();
+#endif
+		
+		/*
+		 * If any of the input buffers has RMS under threshold
+		 */
+		if(rms1>threshold && rms2>threshold){
+			sprintf(msg_buf,"\r\nrms1:%d\r\nrms2:%d\r\nthreshold:%d\r\n",(int)rms1,(int)rms2,threshold);
+			HAL_UART_Transmit_DMA(&huart6,(uint8_t*)msg_buf,strlen(msg_buf));
+			/*Increment over threshold counter up to 3*/
+			if(ovr_thr_cnt<3)
+				ovr_thr_cnt++;
+		}
+		else{
+			ovr_thr_cnt=0;
+		}
+
+
+		/*
+		 * Update cross-correlation circular buffer offset
+		 * XCOR_BUF_SZ = AUDIO_BUF_SZ * XCOR_BUF_MULT
+		 */
+		xcor_buf_oset=( xcor_buf_oset + 1 ) % XCOR_BUF_MULT;
+
+
+		//sprintf(msg_buf,"\r\nxcor_oset:%d\r\nrms1:%d\r\nmax_in:%hu\r\ndc:%hu\r\nmax_xcor_buf1:%drms2:%d\r\nthreshold:%d\r\n",
+				//xcor_buf_oset,(int)rms1,max16,dc1,max,(int)rms2,threshold);
+
+		/*
+		 * Update DC buffer offset idx
+		 */
+		dc_buf_idx=( dc_buf_idx + 1 ) % DC_BUF_SZ;
+	}
+}
+
+/*
+ * Cross correlation function.
+ * Cross correlation circular buffer
+ */
+void xcor(){
+
+
+#ifdef TIME_XCOR
+	CHRONO_START();
+#endif
+
+	for(int i=0;i<AUDIO_BUF_SZ*2-1;i++){
+		for(int j=0;j<AUDIO_BUF_SZ;j++){
+		}
+	}
+#ifdef TIME_XCOR
+	CHRONO_STOP();
+#endif
+}
+
+
+/*
+ * Log debug UART interface motor position computed since the latest call to rstAngle(&motor)
+ */
 void logMotor(){
 
 	sprintf(msg_buf,"Motor position: %f %f %d \r\n\r\n\r\n",
@@ -331,14 +591,14 @@ void motorControl(){
 		dir=jstickGetDirPoll(&js);
 		if(dir==LEFT || LEFT_BUT_PUSH){
 			LEFT_BUT_PUSH=0;
-			step(&motor,0);
+			step(&motor,1);
 
 			logMotor();
 
 		}
 		else if(dir==RIGHT || RIGHT_BUT_PUSH){
 			RIGHT_BUT_PUSH=0;
-			step(&motor,1);
+			step(&motor,0);
 
 			logMotor();
 		}
@@ -356,14 +616,34 @@ void initCalibration(){
 }
 
 void initSSL(){
+
+	uint16_t dc_init=2048;
 	  /*Stop playback loop*/
 	  HAL_DAC_Stop_DMA(&hdac,DAC_CHANNEL_1);
 	  HAL_DAC_Stop_DMA(&hdac,DAC_CHANNEL_2);
 
-	  /*Reset motor angle idx to set initial camera offset*/
+	  /*Reset motor angle idx to 0 to set initial camera offset*/
 	  rstAngle(&motor);
 	  logMotor();
 	  mode=1;
+
+	  /*Reset xcor_buf_oset*/
+	  xcor_buf_oset=0;
+	  /*Reset DC buffer idx*/
+	  dc_buf_idx=0;
+	  /*Reset threshold to a start value of 100*/
+	  threshold=30;
+	  /*Reset over threshold counter*/
+	  ovr_thr_cnt=0;
+
+	  /*
+	   * Fill dc offset estimation
+	   */
+	  for(int i=0;i<DC_BUF_SZ;i++){
+		  dc_buf_ch1[i]=dc_init;
+		  dc_buf_ch2[i]=dc_init;
+	  }
+	  /*Toggle led to notify the mode change*/
 	  GPIOD->ODR|=GPIO_PIN_15;
 }
 /* USER CODE END 0 */
@@ -460,6 +740,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   MODE_TOGGLE=0;
   mode=1;
+  threshold=100;
 
   while (1)
   {
@@ -489,20 +770,39 @@ int main(void)
 			  initSSL();
 			  mode=1;
 		  }
+		  audioPreproc();
+		  if(ovr_thr_cnt>=3){
+			  GPIOD->ODR|=GPIO_PIN_13;
+		  }
+		  else{
+			  GPIOD->ODR&=~GPIO_PIN_13;
+		  }
 
+/*
+#ifdef TIME_AUDIO_PROC
+		  CHRONO_START();
+#endif
+		  audioPreproc();
+		  if(ovr_thr){
+			  xcor();
+		  }
+#ifdef TIME_AUDIO_PROC
+		  CHRONO_START();
+#endif
 		  if(LEFT_BUT_PUSH){
-
 			  LEFT_BUT_PUSH=0;
-			  moveToIt(&motor,90.0);
+			  threshold-=5;
+			  sprintf(msg_buf,"Threshold %d\r\n",threshold);
+			  HAL_UART_Transmit_DMA(&huart6,msg_buf,strlen(msg_buf));
 		  }
 		  else if(RIGHT_BUT_PUSH){
-
 			  RIGHT_BUT_PUSH=0;
-			  moveToIt(&motor,-90.0);
+			  threshold+=5;
+			  sprintf(msg_buf,"Threshold %d\r\n",threshold);
+			  HAL_UART_Transmit_DMA(&huart6,msg_buf,strlen(msg_buf));
 		  }
+		  */
 	  }
-
-
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -1108,6 +1408,9 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOC_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_11, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15
                           |GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4, GPIO_PIN_RESET);
 
@@ -1115,6 +1418,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PE11 */
+  GPIO_InitStruct.Pin = GPIO_PIN_11;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PD12 PD13 PD14 PD15
@@ -1159,9 +1469,15 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
+  /*
+   * Step api callback: perform one step while moving to an angle in interrupt mode
+   */
   else if( htim->Instance == TIM4 ){
 	  stepIt(&motor);
   }
+  /*
+   *
+   */
   else if( htim->Instance == TIM6 ){
 	  AMG_RD_START=1;
   }
@@ -1173,10 +1489,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   else if( htim->Instance == TIM10 ){
 
 	  if( GPIOE->IDR & GPIO_PIN_2 && EXTI_BUT_PUSH  )
-		  RIGHT_BUT_PUSH=1;
+		  LEFT_BUT_PUSH=1;
 
 	  else if( GPIOE->IDR & GPIO_PIN_3  && EXTI_BUT_PUSH )
-		  LEFT_BUT_PUSH=1;
+		  RIGHT_BUT_PUSH=1;
 
 	  else if( GPIOE->IDR & GPIO_PIN_4 && EXTI_BUT_PUSH )
 		  MODE_TOGGLE^=1;
