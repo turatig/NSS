@@ -60,20 +60,23 @@ void setLim(Step *inst,float angle){
  */
 void waveStep(Step *inst,uint8_t dir){
 
-	/*Reset current step pin*/
+	/*Reset previous step pin*/
 	inst->port->ODR&= ~(inst->pins[ inst->cur_step ]);
 
-	/*Update current step and angular index according to given direction*/
 	if(dir){
+
+		/*Move forward cur_step*/
 		inst->cur_step=(inst->cur_step + 1) & 0x3;
 		inst->ang_idx ++;
 	}
 	else{
+
+		/*Move backward cur_step*/
 		inst->cur_step= inst->cur_step ? (inst->cur_step - 1) : 0x3;
 		inst->ang_idx --;
 	}
 
-	/*Set updated current step pin*/
+	/*Set current step pin*/
 	inst->port->ODR|= inst->pins[ inst->cur_step ];
 }
 
@@ -87,29 +90,31 @@ void waveStep(Step *inst,uint8_t dir){
  */
 void fullStep(Step *inst,uint8_t dir){
 
-	/*Update current step and angular index according to given direction*/
 	if(dir){
-		/*Reset current step pin*/
+		/*Reset previous step pin*/
 		inst->port->ODR&= ~(inst->pins[ inst->cur_step ]);
 
+		/*Move forward cur_step*/
 		inst->cur_step=(inst->cur_step + 1) & 0x3;
 		inst->ang_idx ++;
 
 
 	}
 	else{
-		/*Reset current step pin*/
+		/*Reset previous step right sibling pin*/
 		inst->port->ODR&= ~(inst->pins[ (inst->cur_step + 1) & 0x3 ]);
+
+		/*Move backward cur_step*/
 		inst->cur_step= inst->cur_step ? (inst->cur_step - 1) : 0x3;
 		inst->ang_idx --;
 	}
 
-	/*Set updated current step pin*/
+	/*Set current step pin and its right sibling*/
 	inst->port->ODR|= ( inst->pins[ inst->cur_step ] | inst->pins[ (inst->cur_step + 1) & 0x3] );
 }
 
 /*
- * Step commands exported to client
+ * Step command
  */
 void step(Step *inst,uint8_t dir){
 	switch(inst->mode){
@@ -120,7 +125,9 @@ void step(Step *inst,uint8_t dir){
 	}
 }
 
-/*Move motor from a starting position to a destination expressed in angle (degree)*/
+/*
+ * Move motor from a starting position to a destination expressed in angle degrees
+ */
 void moveToPoll(Step *inst,float angle){
 
 	if(!inst->move_lock){
@@ -171,7 +178,9 @@ void stepIt(Step *inst){
 }
 
 
-/*Move motor from a starting position to a destination expressed in angle (degree)*/
+/*
+ * Move motor from a starting position to a destination expressed in angle degrees
+ */
 void moveToIt(Step *inst,float angle){
 
 	if(!inst->move_lock){
@@ -180,6 +189,14 @@ void moveToIt(Step *inst,float angle){
 		inst->destination_it=angle;
 		HAL_TIM_Base_Start_IT( inst->htim );
 	}
+}
+
+/*
+ * Stop stepper motor while is moving to a destination
+ */
+void stop(Step* inst){
+	HAL_TIM_Base_Stop_IT(inst->htim);
+	inst->move_lock=0;
 }
 
 

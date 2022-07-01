@@ -15,8 +15,7 @@
 
 typedef enum{
 	WAVE=0x0,
-	FULL=0x1,
-	HALF=0x2
+	FULL=0x1
 }StepMode;
 
 /* Step motor driver library*/
@@ -68,5 +67,7 @@ void step(Step *inst,uint8_t dir);
 void stepIt(Step *inst);
 void moveToPoll(Step *inst,float angle);
 void moveToIt(Step *inst,float angle);
+/*Stop motor while is stepping in interrupt mode*/
+void stop(Step* inst);
 
 #endif /* INC_STEP_H_ */

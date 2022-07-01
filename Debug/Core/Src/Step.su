@@ -4,8 +4,9 @@
 ../Core/Src/Step.c:43:6:rstAngle	16	static
 ../Core/Src/Step.c:47:6:setLim	16	static
 ../Core/Src/Step.c:61:6:waveStep	16	static
-../Core/Src/Step.c:88:6:fullStep	16	static
-../Core/Src/Step.c:114:6:step	16	static
-../Core/Src/Step.c:124:6:moveToPoll	16	static
-../Core/Src/Step.c:152:6:stepIt	16	static
-../Core/Src/Step.c:175:6:moveToIt	16	static
+../Core/Src/Step.c:91:6:fullStep	16	static
+../Core/Src/Step.c:119:6:step	16	static
+../Core/Src/Step.c:131:6:moveToPoll	16	static
+../Core/Src/Step.c:159:6:stepIt	16	static
+../Core/Src/Step.c:184:6:moveToIt	16	static
+../Core/Src/Step.c:197:6:stop	16	static
