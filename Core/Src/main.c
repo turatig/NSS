@@ -899,6 +899,7 @@ int main(void)
   testDAC();
 #endif
 
+
   /*
    * Init DMA handle data structures for thermal image in/out transfer
    */
@@ -925,7 +926,7 @@ int main(void)
 
   HAL_Delay(50);
 
-  /*Start Timer 6 - Update event every 1/20 s for thermal camera reading*/
+  /*Start Timer 6 - Update event every 0.025 s for thermal camera reading*/
   HAL_TIM_Base_Start_IT(&htim6);
   /*Start Timer 7 - Update event every 1/10 s for motor control*/
   HAL_TIM_Base_Start_IT(&htim7);
