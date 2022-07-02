@@ -5,7 +5,6 @@
  *      Author: jack
  */
 #include "Step.h"
-#include "utils.h"
 #include "stm32f4xx.h"
 
 /*Init stepper motor data structure*/

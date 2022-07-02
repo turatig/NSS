@@ -7,7 +7,6 @@
 
 #include "Jstick.h"
 #include "stm32f4xx.h"
-#include "utils.h"
 
 
 void initJstick(Jstick *inst,ADC_HandleTypeDef *hadc,uint16_t errpin,GPIO_TypeDef *errport){

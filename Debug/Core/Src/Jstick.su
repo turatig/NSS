@@ -1,2 +1,2 @@
-../Core/Src/Jstick.c:13:6:initJstick	24	static
-../Core/Src/Jstick.c:21:11:jstickGetDirPoll	24	static
+../Core/Src/Jstick.c:12:6:initJstick	24	static
+../Core/Src/Jstick.c:20:11:jstickGetDirPoll	24	static

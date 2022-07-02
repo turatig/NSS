@@ -25,7 +25,6 @@
 #include "AMG8833.h"
 #include "Step.h"
 #include "Jstick.h"
-#include "utils.h"
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -113,8 +112,9 @@
 //#define TIME_PREPROC 1
 //#define TIME_CONV_CH1 1
 //#define TIME_CONV_CH2 1
-//#define TIME_XCOR 1
-//#define TIME_AUDIO_PROC 1
+//#deinfe TIME_XCOR 1
+//#define TIME_VIDEO_STREAM 1
+//#define TIME_AUDIO_STREAM 1
 /*
 * Set oscilloscope timer trigger
 */
@@ -148,7 +148,6 @@ I2C_HandleTypeDef hi2c1;
 DMA_HandleTypeDef hdma_i2c1_rx;
 
 TIM_HandleTypeDef htim2;
-TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim4;
 TIM_HandleTypeDef htim6;
 TIM_HandleTypeDef htim7;
@@ -205,11 +204,6 @@ uint16_t dc_buf_idx;
  * Else will be reset to 0
  */
 uint8_t ovr_thr_cnt;
-/*
- * This flag is set by the preprocessing loop in SSL mode if RMS of signal in ch1-2 is above the threshold
- * Trigger sound localization event
- */
-uint8_t ovr_thr;
 
 /*
  * RMS above this threshold to trigger SSL event
@@ -252,7 +246,6 @@ static void MX_TIM7_Init(void);
 static void MX_USART6_UART_Init(void);
 static void MX_TIM10_Init(void);
 static void MX_TIM4_Init(void);
-static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -326,6 +319,9 @@ void thermalImgFSM(){
 		if(status==HAL_OK){
 			//Clear ctrl read start bit
 			AMG_RD_START=0;
+#ifdef TIME_VIDEO_STREAM
+			CHRONO_START();
+#endif
 		}
 	  }
 
@@ -341,101 +337,13 @@ void thermalImgFSM(){
 	  if(AMG_OUT_CPLT){
 		  AMG_OUT_CPLT=0;
 		  HAL_TIM_Base_Start_IT(&htim6);
+
+#ifdef TIME_VIDEO_STREAM
+			CHRONO_STOP();
+#endif
 	  }
 }
 
-/*
- * Callback function to manage external interrupt push buttons pushed
- */
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_PIN){
-	/*
-	 * Manage interrupt on exti line from AMG8833 sensor
-	 */
-	if( GPIO_PIN == GPIO_PIN_15 ){
-		GPIOD->ODR|=GPIO_PIN_13;
-		AMG_TARGET_DET=1;
-		stop( &motor );
-	}
-	/*
-	 * Other exti lines interrupts come from push buttons: GPIO_PIN_2/3/4
-	 */
-	else if( !EXTI_BUT_PUSH  ){
-		EXTI_BUT_PUSH=1;
-		//Start debounce timer: interrupt after 50 ms
-		HAL_TIM_Base_Start_IT(&htim10);
-	}
-}
-
-void targetDetect(){
-	  /*
-	   * Set absolute value value threshold to detect hot objects
-	   */
-	  amg8833SetAbsHighThrs( &cam,(uint16_t)( 37.0/0.25 ),2 );
-	  /*
-	   * Set absolute threshold interrupt mode
-	   */
-	  amg8833SetIntMode( &cam,1,2 );
-	  /*
-	   * Enable interrupt on amg8833
-	   */
-	  amg8833IntEn( &cam,2 );
-	  /*
-	   * Reset interrupt flag
-	   */
-	  AMG_TARGET_DET=0;
-
-	 /*
-	  * Pan with the camera and stop the movement if amg8833 triggers interrupt on exti line (i.e. target detected)
-	  */
-	 if( motor.ang_idx > 0 ){
-		 /*
-		  * Move to the right limit
-		  */
-		 moveToIt( &motor,80.0 );
-
-		 while( motor.move_lock ){
-			 thermalImgFSM();
-		 }
-		 /*
-		  * If no target was detected
-		  */
-		 if(!AMG_TARGET_DET){
-			 /*
-			  * Move to the left limit and stop if target is detected
-			  */
-			 moveToIt( &motor, -80.0 );
-			 while( motor.move_lock ){
-				 thermalImgFSM();
-			 }
-		 }
-	 }
-	 else{
-		 moveToIt( &motor,80.0 );
-
-		 while( motor.move_lock ){
-			 thermalImgFSM();
-		 }
-		 if(!AMG_TARGET_DET){
-			 moveToIt( &motor, -80.0 );
-			 while( motor.move_lock ){
-				 thermalImgFSM();
-			 }
-		 }
-	 }
-	 /*
-	  * Disable amg8833 interrupt
-	  */
-	 amg8833IntDis( &cam,2 );
-
-	 if( AMG_TARGET_DET ){
-		 GPIOD->ODR&=~GPIO_PIN_13;
-		 sprintf( msg_buf,"Target was detected at angle: %f\r\n", motor.ang_idx*motor.res );
-		 HAL_UART_Transmit( &huart6,(uint8_t *)msg_buf,strlen(msg_buf),HAL_MAX_DELAY);
-	 }
-
-	 AMG_TARGET_DET=0;
-
-}
 
 
 /*
@@ -491,35 +399,6 @@ void HAL_DACEx_ConvCpltCallbackCh2(DAC_HandleTypeDef *hdac){
 	BUF2_CPLT=1;
 }
 
-/*
- * Handler for audio input DMA memory transfer half-cplt interrupt
- * AUDIO_TOT_BUF_SZ sample were taken from audio out buf and fed into DAC.
- * Data can be moved by main application from higher audio_in_buf to lower audio_out_buf (SSL mode only)
- */
-/*void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc){
-	if(mode){
-		if(hadc->Instance==ADC1){
-
-#ifdef TIME_CONV_CH1
-			CHRONO_STOP();
-#endif
-			audio_in_ptr1=&audio_in_buf1[AUDIO_BUF_SZ];
-			//audio_out_ptr1=&audio_out_buf1[0];
-			BUF1_CPLT=1;
-		}
-
-		if(hadc->Instance==ADC2){
-
-#ifdef TIME_CONV_CH2
-			CHRONO_STOP();
-#endif
-			audio_in_ptr2=&audio_in_buf2[AUDIO_BUF_SZ];
-			//audio_out_ptr2=&audio_out_buf2[0];
-			BUF2_CPLT=1;
-		}
-
-	}
-}
 
 /*
  * Audio playback process.
@@ -529,18 +408,42 @@ void HAL_DACEx_ConvCpltCallbackCh2(DAC_HandleTypeDef *hdac){
 
 void audioPlayback(){
 
+	uint32_t mean1,mean2;
+
 	/*If channel 1 and 2 conversion was completed*/
 	if(BUF1_CPLT && BUF2_CPLT){
 		BUF1_CPLT=0;
 		BUF2_CPLT=0;
 
+#ifdef TIME_AUDIO_STREAM
+			CHRONO_START();
+#endif
+
 		/*Transfer samples from input to output buffers*/
 		for(int i=0;i<AUDIO_BUF_SZ;i++){
+			/*
+			 * Compute mean value in buffers 1 and 2
+			 */
+			mean1+=audio_in_ptr1[i];
+			mean2+=audio_in_ptr2[i];
+
 			audio_out_ptr1[i]=audio_in_ptr1[i];
 			audio_out_ptr2[i]=audio_in_ptr2[i];
 
 		}
+		/*
+		 * Enqueue last mean value computed and increment DC buffer pointer
+		 */
+		dc_buf_ch1[dc_buf_idx]=(uint16_t)( mean1/AUDIO_BUF_SZ );
+		dc_buf_ch2[dc_buf_idx]=(uint16_t)( mean2/AUDIO_BUF_SZ );
+
+		dc_buf_idx=( dc_buf_idx + 1 ) % DC_BUF_SZ;
+
+#ifdef TIME_AUDIO_STREAM
+			CHRONO_STOP();
+#endif
 	}
+
 }
 
 /*
@@ -622,6 +525,9 @@ void audioPreproc(){
 		for(int i=0,idx;i<AUDIO_BUF_SZ;i++){
 
 			idx=xcor_buf_oset * AUDIO_BUF_SZ + i;
+			/*
+			 * CROSS-CORRELATION FEATURE CURRENTLY UNUSED
+			 */
 			xcor_buf1[idx]=audio_in_ptr1[i] - dc1;
 			xcor_buf2[idx]=audio_in_ptr2[i] - dc2;
 
@@ -672,6 +578,109 @@ void audioPreproc(){
 }
 
 /*
+ * Callback function to manage external interrupt push buttons pushed
+ */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_PIN){
+	/*
+	 * Manage interrupt on exti line from AMG8833 sensor
+	 */
+	if( GPIO_PIN == GPIO_PIN_15 ){
+
+		AMG_TARGET_DET=1;
+		stop( &motor );
+	}
+	/*
+	 * Other exti lines interrupts come from push buttons: GPIO_PIN_2/3/4
+	 */
+	else if( !EXTI_BUT_PUSH  ){
+		EXTI_BUT_PUSH=1;
+		//Start debounce timer: interrupt after 50 ms
+		HAL_TIM_Base_Start_IT(&htim10);
+	}
+}
+
+/*
+ * Manage audio/video streaming while searching a target towards a destination
+ * expressed in angle degree
+ */
+void searchWhilePlay(float angle){
+	 /*
+	  * Move to the right limit
+	  */
+	 moveToIt( &motor,angle );
+
+	 /*
+	  * While motor is in motion
+	  */
+	 while( motor.move_lock ){
+
+		 audioPreproc();
+		 thermalImgFSM();
+	 }
+
+}
+void targetDetect(){
+	  /*
+	   * Set absolute value value threshold to detect hot objects
+	   * Test it with this threshold by making noise and light on a lighter
+	   * Adjust threshold to 28° detect a human in a room at approximately 20°
+	   */
+	  amg8833SetAbsHighThrs( &cam,(uint16_t)( 37.0/0.25 ),2 );
+	  /*
+	   * Set absolute threshold interrupt mode
+	   */
+	  amg8833SetIntMode( &cam,1,2 );
+	  /*
+	   * Enable interrupt on amg8833
+	   */
+	  amg8833IntEn( &cam,3 );
+	  /*
+	   * Reset interrupt flag
+	   */
+	  AMG_TARGET_DET=0;
+
+	 /*
+	  * Pan with the camera and stop the movement if amg8833 triggers interrupt on exti line (i.e. target detected)
+	  */
+	 if( motor.ang_idx > 0 ){
+		 /*
+		  * Move to the right limit and stop if target is detected
+		  */
+		 searchWhilePlay( -80.0 );
+		 /*
+		  * If no target was detected
+		  */
+		 if(!AMG_TARGET_DET){
+			 /*
+			  * Move to the left limit and stop if target is detected
+			  */
+			 searchWhilePlay( 80.0 );
+		 }
+	 }
+	 else{
+		 searchWhilePlay( 80.0 );
+
+		 if(!AMG_TARGET_DET){
+			 searchWhilePlay( -80.0 );
+		 }
+	 }
+	 /*
+	  * Disable amg8833 interrupt
+	  */
+	 amg8833IntDis( &cam,2 );
+
+	 if( AMG_TARGET_DET ){
+
+		 sprintf( msg_buf,"Target was detected at angle: %f\r\n", motor.ang_idx*motor.res );
+		 HAL_UART_Transmit( &huart6,(uint8_t *)msg_buf,strlen(msg_buf),HAL_MAX_DELAY);
+	 }
+
+	 AMG_TARGET_DET=0;
+
+}
+
+
+/* CROSS-CORRELATION FEATURE CURRENTLY UNUSED
  * Cross correlation function.
  * In order to avoid biased values at borders cross correlation buffer size is XCOR_BUF_MULT*AUDIO_BUF_SZ
  */
@@ -819,12 +828,10 @@ void initCalibration(){
 	GPIOD->ODR&=~GPIO_PIN_15;
 }
 
+/*
+ * Initi Sound Source Localization mode
+ */
 void initSSL(){
-
-	uint16_t dc_init=2048;
-	  /*Stop playback loop*/
-	  /*HAL_DAC_Stop_DMA(&hdac,DAC_CHANNEL_1);
-	  HAL_DAC_Stop_DMA(&hdac,DAC_CHANNEL_2);*/
 
 	  /*Reset motor angle idx to 0 to set initial camera offset*/
 	  rstAngle(&motor);
@@ -833,20 +840,11 @@ void initSSL(){
 
 	  /*Reset xcor_buf_oset*/
 	  xcor_buf_oset=0;
-	  /*Reset DC buffer idx*/
-	  dc_buf_idx=0;
+
 	  /*Reset threshold to a start value of 100*/
-	  threshold=30;
+	  threshold=50;
 	  /*Reset over threshold counter*/
 	  ovr_thr_cnt=0;
-
-	  /*
-	   * Fill dc offset estimation
-	   */
-	  for(int i=0;i<DC_BUF_SZ;i++){
-		  dc_buf_ch1[i]=dc_init;
-		  dc_buf_ch2[i]=dc_init;
-	  }
 
 	  sprintf(msg_buf,"Max delay between audio signals (in samples):%d\r\b",MAX_DELAY);
 	  HAL_UART_Transmit(&huart6,(uint8_t*)msg_buf,strlen(msg_buf),HAL_MAX_DELAY);
@@ -894,7 +892,6 @@ int main(void)
   MX_USART6_UART_Init();
   MX_TIM10_Init();
   MX_TIM4_Init();
-  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
 
 
@@ -928,15 +925,19 @@ int main(void)
 
   HAL_Delay(50);
 
-  /*
-   * Start timer 3 to trigger interrupt flag reading on AMG camera
-   */
-  //HAL_TIM_Base_Start_IT(&htim3);
   /*Start Timer 6 - Update event every 1/20 s for thermal camera reading*/
   HAL_TIM_Base_Start_IT(&htim6);
   /*Start Timer 7 - Update event every 1/10 s for motor control*/
   HAL_TIM_Base_Start_IT(&htim7);
 
+  uint16_t dc_init=2048;
+  /*
+   * Fill dc offset estimation with intial value
+   */
+  for(int i=0;i<DC_BUF_SZ;i++){
+	  dc_buf_ch1[i]=dc_init;
+	  dc_buf_ch2[i]=dc_init;
+  }
   /*
    * Start audio clock
    */
@@ -996,8 +997,14 @@ int main(void)
 			  mode=1;
 			  HAL_Delay( 100 );
 		  }
+		  /*
+		   * Preprocess audio and compute RMS of audio buffers
+		   */
 		  audioPreproc();
-
+		  /*
+		   * If more than BUF_OVR_THR consecutive buffers were found to be over the threshold
+		   * trigger hot target detection
+		   */
 		 if( ovr_thr_cnt >= BUF_OVR_THR ){
 			 targetDetect();
 		 }
@@ -1335,51 +1342,6 @@ static void MX_TIM2_Init(void)
   /* USER CODE BEGIN TIM2_Init 2 */
 
   /* USER CODE END TIM2_Init 2 */
-
-}
-
-/**
-  * @brief TIM3 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_TIM3_Init(void)
-{
-
-  /* USER CODE BEGIN TIM3_Init 0 */
-
-  /* USER CODE END TIM3_Init 0 */
-
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-
-  /* USER CODE BEGIN TIM3_Init 1 */
-
-  /* USER CODE END TIM3_Init 1 */
-  htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 128;
-  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 65103;
-  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM3_Init 2 */
-
-  /* USER CODE END TIM3_Init 2 */
 
 }
 
@@ -1723,10 +1685,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
-
-  else if( htim->Instance == TIM3 ){
-	  AMG_TARGET_DET=1;
-  }
   /*
    * Step api callback: perform one step while moving to an angle in interrupt mode
    */

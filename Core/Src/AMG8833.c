@@ -7,7 +7,6 @@
 
 
 #include "AMG8833.h"
-#include "utils.h"
 #include "stm32f4xx.h"
 
 void amg8833Init(AMG8833 *inst,I2C_HandleTypeDef *hi2c, uint8_t ad_sel){
